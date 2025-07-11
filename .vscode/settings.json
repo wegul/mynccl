@@ -1,0 +1,41 @@
+{
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "clangd.arguments": [
+    "--background-index",
+    "--clang-tidy",
+    "--completion-style=detailed",
+    "--function-arg-placeholders",
+    "--header-insertion=iwyu",
+    "--compile-commands-dir=${workspaceFolder}/.vscode"
+  ],
+  "clangd.fallbackFlags": [
+    "-std=c++11",
+    "-Wall",
+    "-Wno-unused-function",
+    "-Wno-sign-compare",
+    "-Wno-unused-variable",
+    "-Wno-unused-parameter"
+  ],
+  "files.associations": {
+    "*.h": "c",
+    "*.cc": "cpp",
+    "*.cpp": "cpp",
+    "*.cu": "cuda-cpp"
+  },
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+  "search.exclude": {
+    "**/build/**": true,
+    "**/.git/**": true,
+    "**/node_modules/**": true
+  },
+  "C_Cpp.vcFormat.indent.caseContentsWhenBlock": false,
+  "C_Cpp.formatting": "clangFormat",
+  "C_Cpp.vcFormat.indent.braces": false,
+  "C_Cpp.vcFormat.indent.caseLabels": false,
+  "C_Cpp.vcFormat.indent.accessSpecifiers": false,
+  "editor.tabSize": 2,
+  "C_Cpp.vcFormat.indent.caseContents": false,
+  "C_Cpp.vcFormat.indent.lambdaBracesWhenParameter": false,
+  "C_Cpp.vcFormat.indent.namespaceContents": false,
+  "editor.detectIndentation": false
+}

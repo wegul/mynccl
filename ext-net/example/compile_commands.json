@@ -1,0 +1,16 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-c",
+      "-Inccl",
+      "-fPIC",
+      "-o",
+      "libnccl-net-example.so",
+      "plugin.c"
+    ],
+    "directory": "/home/suweigao/mynccl/ext-net/example",
+    "file": "/home/suweigao/mynccl/ext-net/example/plugin.c",
+    "output": "/home/suweigao/mynccl/ext-net/example/libnccl-net-example.so"
+  }
+]

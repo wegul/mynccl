@@ -1,0 +1,113 @@
+CompileFlags:
+  Add:
+    # Plugin specific includes  
+    - -I/home/suweigao/mynccl/ext-net/gnic/nccl
+    - -I/home/suweigao/mynccl/ext-net/gnic/rdma_util
+    - -I/home/suweigao/mynccl/ext-net/gnic/rdma_util/jring
+    
+    # Standard system includes
+    - -I/home/suweigao/mynccl/src/include
+    - -I/usr/local/cuda/include
+    - -I/usr/include
+    - -I/usr/include/c++/11
+    - -I/usr/include/x86_64-linux-gnu/c++/11
+    - -I/usr/include/c++/11/backward
+    - -I/usr/lib/gcc/x86_64-linux-gnu/11/include
+    - -I/usr/local/include
+    - -I/usr/lib/gcc/x86_64-linux-gnu/11/include-fixed
+    - -I/usr/include/x86_64-linux-gnu
+    
+    # InfiniBand includes
+    - -I/usr/include/infiniband
+    - -I/usr/include/rdma
+    
+    # Compiler flags
+    - -xc++  # Treat all files as C++
+    - -std=c++17
+    - -fPIC
+    - -Wall
+    - -Wno-unused-function
+    - -Wno-sign-compare
+    - -Wno-unused-variable
+    - -Wno-unused-parameter
+    - -fvisibility=hidden
+    
+ 
+    
+    # Define macros that are commonly used
+    - -DCUDA_MAJOR=11
+    - -DCUDA_MINOR=8
+    - -DNCCL_MAJOR=2
+    - -DNCCL_MINOR=27
+    - -DNCCL_PATCH=5
+    - -D__CUDA_ARCH__=800
+    
+
+    
+  Remove:
+    # Remove NVCC specific flags that clangd doesn't understand
+    - -ccbin
+    - --expt-extended-lambda
+    - -Xptxas
+    - -maxrregcount=*
+    - -Xfatbin
+    - -compress-all
+    - --generate-code*
+    - -gencode*
+    - --gpu-architecture*
+    - --gpu-code*
+
+Diagnostics:
+  Suppress:
+    # Suppress style warnings for plugin code that follows NCCL conventions
+    - readability-identifier-length
+    - readability-braces-around-statements
+    - bugprone-easily-swappable-parameters
+    - misc-unused-parameters
+    - misc-include-cleaner
+    - modernize-use-auto
+    - readability-implicit-bool-conversion
+    - bugprone-integer-division
+    
+  ClangTidy:
+    Add:
+      - bugprone-*
+    Remove:
+      # Core Guidelines that don't fit C-style system programming
+      - cppcoreguidelines-avoid-magic-numbers
+      - cppcoreguidelines-avoid-c-arrays
+      - cppcoreguidelines-pro-bounds-array-to-pointer-decay
+      - cppcoreguidelines-pro-bounds-pointer-arithmetic
+      - cppcoreguidelines-pro-type-cstyle-cast
+      - cppcoreguidelines-pro-type-vararg
+      - cppcoreguidelines-avoid-do-while
+      - cppcoreguidelines-avoid-non-const-global-variables
+      - cppcoreguidelines-init-variables
+      - cppcoreguidelines-macro-usage
+      
+      # Modernize checks that don't fit legacy C++ code
+      - modernize-use-trailing-return-type
+      - modernize-use-auto
+      - modernize-avoid-c-arrays
+      
+      # Readability checks that are too strict for system code
+      - readability-magic-numbers
+      - readability-function-cognitive-complexity
+      - readability-identifier-length
+      - readability-braces-around-statements
+      - readability-implicit-bool-conversion
+      
+      # Bugprone checks that are noisy for function signatures
+      - bugprone-easily-swappable-parameters
+      - bugprone-integer-division
+      
+      # Misc checks
+      - misc-unused-parameters
+      - misc-include-cleaner
+      - misc-non-private-member-variables-in-classes
+
+Index:
+  Background: Build
+  
+Completion:
+  AllScopes: true
