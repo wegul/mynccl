@@ -17,8 +17,7 @@
 
 #if __CUDA_ARCH__ >= 700
 // __grid_constant__ appears to break cuda-gdb
-//#define NCCL_GRID_CONSTANT __grid_constant__
-#define NCCL_GRID_CONSTANT
+#define NCCL_GRID_CONSTANT __grid_constant__
 #else
 #define NCCL_GRID_CONSTANT
 #endif
@@ -37,13 +36,14 @@ struct ncclShmemGroup {
     unpackGroupShmem unpack;
   } devicePlugin;
   int32_t dstSizes[NCCL_MAX_ARITY+1];
+  uint64_t redOpArgs;
 };
 
 struct ncclShmemData {
   struct ncclDevKernelArgs args;
   int channelId;
   int aborted;
-  alignas(16) struct ncclDevComm comm;
+  alignas(16) struct ncclKernelComm comm;
   alignas(16) struct ncclDevChannel channel;
 
   int batchIx, nextBatchIx;
@@ -55,9 +55,8 @@ struct ncclShmemData {
   uint64_t workCounter;
   bool profilerEnabled;
   struct ncclShmemGroup groups[NCCL_MAX_GROUPS];
-  uint64_t redOpArgs[NCCL_MAX_NVLS_ARITY+1];
 
-  alignas(16) char workStorage[1024];
+  alignas(16) char workStorage[ncclMaxDevWorkBatchBytes()];
 
   alignas(16) union {
     unpackShmem unpack;
@@ -171,6 +170,12 @@ __device__ __forceinline__ void loadWorkBatchToShmem(
       packInWork = tid%(workSize/16);
       dstWork = tid/(workSize/16);
       break;
+    case (int)ncclDevWorkTypeBcast:
+      workSize = sizeof(struct ncclDevWorkBcast);
+      nPacks = nWorks*(workSize/16);
+      packInWork = tid%(workSize/16);
+      dstWork = tid/(workSize/16);
+      break;
     case (int)ncclDevWorkTypeCollReg:
     default:
       workSize = sizeof(struct ncclDevWorkCollReg);
@@ -260,6 +265,9 @@ struct RunWorkBatch;
 template<typename T, typename RedOp>
 struct RunWorkBatch<ncclFuncSendRecv, T, RedOp, NCCL_ALGO_RING, NCCL_PROTO_SIMPLE>;
 
+template<typename T, typename RedOp, int Proto>
+struct RunWorkBatch<ncclFuncAllGatherV, T, RedOp, NCCL_ALGO_RING, Proto>;
+
 // Specialized here for non-P2p (Coll and CollReg)
 template<ncclFunc_t Fn, typename T, typename RedOp, int Algo, int Proto>
 struct RunWorkBatch {
@@ -323,7 +331,7 @@ __device__ __forceinline__ void profiler(int action) {
         ncclShmem.comm.workCompleted[ncclShmem.channelId].data[wc%MAX_PROFILER_EVENTS_PER_CHANNEL].counter = wc;
       }
       ncclShmem.channel.workCounter += ncclShmem.nWorks;
-      if (action == FINI) ((ncclDevCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId].workCounter = ncclShmem.channel.workCounter;
+      if (action == FINI) ((ncclKernelCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId].workCounter = ncclShmem.channel.workCounter;
     }
   }
 }
@@ -351,7 +359,7 @@ __device__ __forceinline__ void ncclKernelMain(struct ncclDevKernelArgs const* a
   /* set abort flag to 0 */
   if (tid == 0) {
     ncclShmem.aborted = 0;
-    ncclShmem.channel.workCounter = ((ncclDevCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId].workCounter;
+    ncclShmem.channel.workCounter = ((ncclKernelCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId].workCounter;
   }
 
   // Use first 2 warps to load comm and channel, and remaining load work batch.
@@ -359,14 +367,14 @@ __device__ __forceinline__ void ncclKernelMain(struct ncclDevKernelArgs const* a
   case 0:
     { void* dst = &ncclShmem.comm;
       void* src = ncclShmem.args.comm;
-      int bytes = sizeof(ncclDevComm);
-      static_assert(sizeof(ncclDevComm) <= 16*WARP_SIZE, "ncclDevComm cannot be loaded by a single warp in one insn.");
+      int bytes = sizeof(ncclKernelComm);
+      static_assert(sizeof(ncclKernelComm) <= 16*WARP_SIZE, "ncclKernelComm cannot be loaded by a single warp in one insn.");
       copyToShmem16(tid, dst, src, bytes);
     } break;
   case 1:
-    { // Get address of channel without incurring indirect load from ncclDevComm::channels
+    { // Get address of channel without incurring indirect load from ncclKernelComm::channels
       void* dst = &ncclShmem.channel;
-      void* src = &((ncclDevCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId];
+      void* src = &((ncclKernelCommAndChannels*)ncclShmem.args.comm)->channels[ncclShmem.channelId];
       int bytes = sizeof(ncclDevChannel);
       static_assert(sizeof(ncclDevChannel) <= 16*WARP_SIZE, "ncclDevChannel cannot be loaded by a single warp in one insn.");
       copyToShmem16(tid-WARP_SIZE, dst, src, bytes);

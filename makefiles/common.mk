@@ -19,8 +19,9 @@ RDMA_CORE ?= 0
 NET_PROFILER ?= 0
 MLX5DV ?= 0
 MAX_EXT_NET_PLUGINS ?= 0
+EMIT_LLVM_IR ?= 0
 
-NVCC = $(CUDA_HOME)/bin/nvcc
+NVCC ?= $(CUDA_HOME)/bin/nvcc
 
 CUDA_LIB ?= $(CUDA_HOME)/lib64
 CUDA_INC ?= $(CUDA_HOME)/include
@@ -32,13 +33,8 @@ CUDA_MINOR = $(shell echo $(CUDA_VERSION) | cut -d "." -f 2)
 
 # You should define NVCC_GENCODE in your environment to the minimal set
 # of archs to reduce compile time.
-CUDA8_GENCODE = -gencode=arch=compute_50,code=sm_50 \
-                -gencode=arch=compute_60,code=sm_60 \
+CUDA8_GENCODE = -gencode=arch=compute_60,code=sm_60 \
                 -gencode=arch=compute_61,code=sm_61
-ifeq ($(shell test "0$(CUDA_MAJOR)" -lt 12; echo $$?),0)
-# SM35 is deprecated from CUDA12.0 onwards
-CUDA8_GENCODE += -gencode=arch=compute_35,code=sm_35
-endif
 CUDA9_GENCODE = -gencode=arch=compute_70,code=sm_70
 CUDA10_GENCODE = -gencode=arch=compute_75,code=sm_75
 CUDA11_GENCODE = -gencode=arch=compute_80,code=sm_80
@@ -76,7 +72,7 @@ $(info NVCC_GENCODE is ${NVCC_GENCODE})
 ifeq ($(shell test "0$(CUDA_MAJOR)" -ge 13; echo $$?),0)
   CXXSTD ?= -std=c++17
 else
-  CXXSTD ?= -std=c++11
+  CXXSTD ?= -std=c++14
 endif
 
 CXXFLAGS   := -DCUDA_MAJOR=$(CUDA_MAJOR) -DCUDA_MINOR=$(CUDA_MINOR) -fPIC -fvisibility=hidden \
@@ -89,6 +85,8 @@ CXXFLAGS   := -DCUDA_MAJOR=$(CUDA_MAJOR) -DCUDA_MINOR=$(CUDA_MINOR) -fPIC -fvisi
 NVCUFLAGS  := -ccbin $(CXX) $(NVCC_GENCODE) $(CXXSTD) --expt-extended-lambda -Xptxas -maxrregcount=96 -Xfatbin -compress-all
 # Use addprefix so that we can specify more than one path
 NVLDFLAGS  := -L${CUDA_LIB} -lcudart -lrt
+
+NVCUFLAGS_SYM :=
 
 ########## GCOV ##########
 GCOV ?= 0 # disable by default.
@@ -162,4 +160,25 @@ endif
 
 ifneq ($(MAX_EXT_NET_PLUGINS), 0)
 CXXFLAGS += -DNCCL_NET_MAX_PLUGINS=$(MAX_EXT_NET_PLUGINS)
+endif
+
+CXXFLAGS += -DDOCA_VERBS_USE_CUDA_WRAPPER -DDOCA_VERBS_USE_NET_WRAPPER
+NVCUFLAGS += -DDOCA_VERBS_USE_CUDA_WRAPPER -DDOCA_VERBS_USE_NET_WRAPPER
+
+CXXFLAGS += -DNCCL_GIN_PROXY_ENABLE=1
+
+# Detect OS Linux or Windows
+ifeq ($(shell uname -s), Linux)
+  NCCL_OS_LINUX := 1
+  CXXFLAGS += -DNCCL_OS_LINUX
+  NVCUFLAGS += -DNCCL_OS_LINUX
+else ifeq ($(shell uname -s), Windows)
+  NCCL_OS_WINDOWS := 1
+  CXXFLAGS += -DNCCL_OS_WINDOWS
+  NVCUFLAGS += -DNCCL_OS_WINDOWS
+endif
+
+# Check and enable LLVM IR generation
+ifneq ($(EMIT_LLVM_IR), 0)
+  CXXFLAGS += -DEMIT_LLVM_IR=1
 endif

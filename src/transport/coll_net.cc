@@ -14,6 +14,7 @@
 #include "bootstrap.h"
 #include "channel.h"
 #include "register_inline.h"
+#include "compiler.h"
 
 int64_t ncclParamGdrCopySyncEnable();
 int64_t ncclParamGdrCopyFlushEnable();
@@ -355,7 +356,7 @@ static ncclResult_t sharedListen(struct ncclProxyState* proxyState, int netDev, 
     collNet->resources = resources;
   }
   if (resources->collNetComms[netDev] == NULL)
-    NCCLCHECK(proxyState->ncclCollNet->listen(netDev, collNetHandle, resources->collNetListenComms + netDev));
+    NCCLCHECK(proxyState->ncclCollNet->listen(proxyState->collNetContext, netDev, collNetHandle, resources->collNetListenComms + netDev));
   return ncclSuccess;
 }
 
@@ -413,14 +414,6 @@ static ncclResult_t sharedBuffersInit(struct ncclCollNetSharedRes* collNet, int 
     NCCLCHECK(ncclCudaHostCalloc(&collNet->hostBuff, *size));
   }
   *gpuPtr = *cpuPtr = cuda ? collNet->cudaBuff : collNet->hostBuff;
-  return ncclSuccess;
-}
-
-static ncclResult_t sharedBuffersGet(struct ncclCollNetSharedRes* collNet, int type, int slot, int channel, int* offset) {
-  // Use different pools for different channels and also separate send/recv.
-  int slotSize = collNet->buffSize / NCCL_STEPS;
-  int globalSlot = (type * NCCL_STEPS + slot) * collNet->nChannels + channel;
-  *offset = slotSize * globalSlot;
   return ncclSuccess;
 }
 
@@ -908,7 +901,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         int buffSlot = (sub->base+sub->posted)%NCCL_STEPS;
         if (sub->reg == 0 || (!sub->isOneRPN && args->coll == ncclFuncReduceScatter)) {
           resources->recvMem->connFifo[buffSlot].offset = calcRegionOffset(args, 0, s, sub->posted, 0);
-          __sync_synchronize();
+          std::atomic_thread_fence(std::memory_order_seq_cst);
         }
         volatile uint64_t* sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
         TRACE(NCCL_NET, "sendProxy [%ld/%d/%d/%d] posted offset %d @ %p signal %ld->%ld", long(sub->posted), group, buffSlot, sub->nsteps, resources->recvMem->connFifo[buffSlot].offset, &resources->recvMem->connFifo[buffSlot].offset, long(*sendHead), long(sub->base + sub->posted + args->sliceSteps - NCCL_STEPS));
@@ -1138,7 +1131,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           int buffSlot = (sub->base + sub->transmitted)%NCCL_STEPS;
           volatile struct ncclConnFifo* connFifo = (volatile struct ncclConnFifo*)resources->recvMem->connFifo;
           connFifo[buffSlot].offset = calcRegionOffset(args, 1, s, sub->transmitted, 0);
-          __sync_synchronize();
+          std::atomic_thread_fence(std::memory_order_seq_cst);
         }
         volatile uint64_t* recvTail = resources->gdcSync ? resources->gdcSync : &resources->recvMem->tail;
         if (sub->reg && sub->isOneRPN) {
@@ -1223,14 +1216,19 @@ ncclResult_t ncclCollnetLocalRegisterBuffer(struct ncclComm* comm, const void* u
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
   bool isValid = false;
+  void *base = NULL;
+  size_t baseSize = 0;
 
   *outRegBufFlag = 0;
   *outHandle = NULL;
   if (comm && userbuff && buffSize > 0) {
     NCCLCHECKGOTO(ncclRegFind(comm, userbuff, buffSize, &regRecord), ret, fail);
     NCCLCHECKGOTO(ncclRegLocalIsValid(regRecord, &isValid), ret, fail);
-    if (isValid)
-      NCCLCHECKGOTO(collnetRegisterBuffer(comm, userbuff, buffSize, type, regRecord, outRegBufFlag, outHandle), ret, fail);
+    if (isValid) {
+      CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&base, &baseSize, (CUdeviceptr)userbuff), ret, fail);
+      if ((uint64_t)base + baseSize < (uint64_t)userbuff + buffSize) goto exit;
+    }
+    NCCLCHECKGOTO(collnetRegisterBuffer(comm, userbuff, buffSize, type, regRecord, outRegBufFlag, outHandle), ret, fail);
   }
 exit:
   return ret;
@@ -1256,13 +1254,14 @@ ncclResult_t ncclCollnetGraphRegisterBuffer(struct ncclComm* comm, const void* u
   ncclResult_t ret = ncclSuccess;
   struct ncclCollnetCleanupCallback* record = NULL;
   struct ncclReg *regRecord = NULL;
-  void *baseSend = NULL;
-  size_t baseSendSize = 0;
+  void *base = NULL;
+  size_t baseSize = 0;
 
   *outRegBufFlag = 0;
   if (comm && userbuff && buffSize > 0) {
-    CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&baseSend, &baseSendSize, (CUdeviceptr)userbuff), ret, fail);
-    NCCLCHECKGOTO(ncclCommGraphRegister(comm, baseSend, baseSendSize, (void**)&regRecord), ret, fail);
+    CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&base, &baseSize, (CUdeviceptr)userbuff), ret, fail);
+    if ((uint64_t)base + baseSize < (uint64_t)userbuff + buffSize) goto exit;
+    NCCLCHECKGOTO(ncclCommGraphRegister(comm, base, baseSize, (void**)&regRecord), ret, fail);
     NCCLCHECKGOTO(collnetRegisterBuffer(comm, userbuff, buffSize, type, regRecord, outRegBufFlag, outHandle), ret, fail);
 
     if (*outRegBufFlag) {
@@ -1458,7 +1457,7 @@ static ncclResult_t collNetInitRailRankMap(ncclComm_t comm) {
     if (comm->collNetHeads[h] == rank) { comm->collNetUserToDenseRank[rank] = h; break; }
   }
   if (comm->collNetUserToDenseRank[rank] == -1) {
-    comm->collNetUserToDenseRank[rank] = __builtin_popcountll(nonHeadMask & ((1ull << comm->localRank) - 1));
+    comm->collNetUserToDenseRank[rank] = COMPILER_POPCOUNT64(nonHeadMask & ((1ull << comm->localRank) - 1));
   }
   comm->collNetUserToDenseRank[rank] += comm->node * comm->localRanks;
 
@@ -1473,11 +1472,7 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
   ncclResult_t ret = ncclSuccess;
   int rank = comm->rank;
   int collNetSetupFail = 0;
-  // Find all head ranks
-  int nHeadsUnique = 0;
-  int* headsUnique = NULL;
   bool share;
-  struct ncclTopoGraph* directGraph = graphs[NCCL_ALGO_COLLNET_DIRECT];
 
   struct collnetShareInfo {
     int headPosition;
@@ -1485,20 +1480,30 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
   };
   struct collnetShareInfo* infos = NULL;
 
-  NCCLCHECKGOTO(ncclCalloc(&headsUnique, directGraph->nChannels), ret, fail);
-  { uint64_t mask = 0;
+  struct ncclTopoGraph* collNetGraph;
+
+  if (!comm->nvlsSupport) {
+    collNetGraph = graphs[NCCL_ALGO_COLLNET_DIRECT];
+    NCCLCHECKGOTO(ncclCalloc(&comm->collNetHeads, collNetGraph->nChannels), ret, fail);
+    uint64_t mask = 0;
     // Head GPU index is always 0
-    for (int c = 0; c < directGraph->nChannels; c++) {
-      int head = directGraph->intra[c * comm->localRanks + 0];
+    for (int c = 0; c < collNetGraph->nChannels; c++) {
+      int head = collNetGraph->intra[c * comm->localRanks + 0];
       assert(comm->rankToNode[head] == comm->node);
       uint64_t mask0 = mask;
       mask |= 1ull<<comm->rankToLocalRank[head];
-      if (mask != mask0) headsUnique[nHeadsUnique++] = head;
+      if (mask != mask0) comm->collNetHeads[comm->collNetHeadsNum++] = head;
     }
+  } else {
+    // Use the NVLS graph to get the head ranks for collnet setup. comm->nvlsHeads already has unique heads.
+    // nHeads is the same on all the channels, see connectNvls function
+    collNetGraph = graphs[NCCL_ALGO_NVLS];
+    NCCLCHECKGOTO(ncclCalloc(&comm->collNetHeads, collNetGraph->nChannels), ret, fail);
+    comm->collNetHeadsNum = comm->channels[0].nvls.nHeads;
+    // Copy over comm->collNetHeads from comm->nvlsHeads since they are freed in different places.
+    memcpy(comm->collNetHeads, comm->nvlsHeads, comm->collNetHeadsNum * sizeof(int));
   }
 
-  comm->collNetHeads = headsUnique;
-  comm->collNetHeadsNum = nHeadsUnique;
   if (parent && parent->config.collnetEnable && parent->nNodes == comm->nNodes) {
     if (!parent->shareResources) {
       collNetSetupFail = 1;
@@ -1508,7 +1513,7 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
     /* check whether child can share collnet resources of parent. Since parent builds each collnet communicator
      * based on heads with the same head position in each node, as long as the collnet heads of child comm
      * can match parent's heads, we can let child communicator share parent's collnet resources. */
-    for (int h = 0; h < nHeadsUnique; ++h) {
+    for (int h = 0; h < comm->collNetHeadsNum; ++h) {
       int prev = INT_MIN;
       struct collnetShareInfo* myinfo;
 
@@ -1516,7 +1521,7 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
       myinfo = infos + comm->rank;
       memset(myinfo, 0, sizeof(struct collnetShareInfo));
       /* find the child head position in parent collnet heads. */
-      if (headsUnique[h] == comm->rank) {
+      if (comm->collNetHeads[h] == comm->rank) {
         myinfo->headPosition = -1;
         myinfo->isMaster = 1;
         for (int th = 0; th < parent->collNetHeadsNum; ++th)
@@ -1567,11 +1572,11 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
     for (int c = 0; c < comm->nChannels; c++) {
       struct ncclChannel* channel = comm->channels + c;
       NCCLCHECKGOTO(initCollnetChannel(comm, c, parent, false), ret, fail);
-      for (int h = 0; h < nHeadsUnique; h++) {
-        const int head = headsUnique[h];
+      for (int h = 0; h < comm->collNetHeadsNum; h++) {
+        const int head = comm->collNetHeads[h];
         ncclConnect connect;
-        collNetSetupFail |= ncclTransportCollNetSetup(comm, directGraph, channel, head, head, h, collNetRecv, &connect);
-        if (!collNetSetupFail) collNetSetupFail |= ncclTransportCollNetSetup(comm, directGraph, channel, head, head, h, collNetSend, &connect);
+        collNetSetupFail |= ncclTransportCollNetSetup(comm, collNetGraph, channel, head, head, h, collNetRecv, &connect);
+        if (!collNetSetupFail) collNetSetupFail |= ncclTransportCollNetSetup(comm, collNetGraph, channel, head, head, h, collNetSend, &connect);
       }
       // Verify CollNet setup across ranks after trying the first channel
       if (c == 0) {
@@ -1592,7 +1597,7 @@ ncclResult_t ncclCollNetSetup(ncclComm_t comm, ncclComm_t parent, struct ncclTop
       bool isHead = false;
       matrix = nullptr;
       NCCLCHECKGOTO(ncclCalloc(&matrix, comm->nRanks), ret, matrix_end);
-      for (int h = 0; h < nHeadsUnique; h++) isHead |= (headsUnique[h] == comm->rank);
+      for (int h = 0; h < comm->collNetHeadsNum; h++) isHead |= (comm->collNetHeads[h] == comm->rank);
       if (isHead) {
         for (int ty=0; ty < ncclNumTypes; ty++) {
           for (int op=0; op < 4; op++) {

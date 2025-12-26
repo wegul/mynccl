@@ -10,12 +10,15 @@
 #include "net.h"
 #include "param.h"
 #include "profiler/net_socket.h"
+#include "os.h"
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <poll.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <mutex>
+#include <condition_variable>
 
 /* Init functions */
 static int ncclNetIfs = -1;
@@ -26,7 +29,7 @@ struct ncclNetSocketDev {
 };
 static struct ncclNetSocketDev ncclNetSocketDevs[MAX_IFS];
 
-pthread_mutex_t ncclNetSocketLock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex ncclNetSocketMutex;
 
 static ncclResult_t ncclNetSocketGetPciPath(char* devName, char** pciPath) {
   char devicePath[PATH_MAX];
@@ -38,17 +41,24 @@ static ncclResult_t ncclNetSocketGetPciPath(char* devName, char** pciPath) {
 
 static ncclProfilerCallback_t ncclProfilerFunction;
 
-ncclResult_t ncclNetSocketInit(ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction) {
+// With ncclNet_v11_t the NCCL core initializes the network plugin per-communicator
+// rather than once for all communicators. However, the internal plugin implementation
+// still assumes the plugin is initialized only once across all communicators. The ref
+// counter makes sure the plugin internally initializes only once. When per communicator
+// context support is added to the plugin the ref counter can be removed.
+static int netRefCount;
+
+ncclResult_t ncclNetSocketInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config, ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction) {
+  if (netRefCount++) return ncclSuccess;
   ncclProfilerFunction = profFunction;
   if (ncclNetIfs == -1) {
-    pthread_mutex_lock(&ncclNetSocketLock);
+    std::lock_guard<std::mutex> lock(ncclNetSocketMutex);
     if (ncclNetIfs == -1) {
       char names[MAX_IF_NAME_SIZE*MAX_IFS];
       union ncclSocketAddress addrs[MAX_IFS];
       NCCLCHECK(ncclFindInterfaces(names, addrs, MAX_IF_NAME_SIZE, MAX_IFS, &ncclNetIfs));
       if (ncclNetIfs <= 0) {
         WARN("NET/Socket : no interface found");
-        pthread_mutex_unlock(&ncclNetSocketLock);
         return ncclInternalError;
       } else {
         #define MAX_LINE_LEN (2047)
@@ -67,7 +77,6 @@ ncclResult_t ncclNetSocketInit(ncclDebugLogger_t logFunction, ncclProfilerCallba
         INFO(NCCL_INIT|NCCL_NET,"NET/Socket : Using%s", line);
       }
     }
-    pthread_mutex_unlock(&ncclNetSocketLock);
   }
   return ncclSuccess;
 }
@@ -116,6 +125,8 @@ ncclResult_t ncclNetSocketGetProperties(int dev, ncclNetProperties_t* props) {
   props->netDeviceType    = NCCL_NET_DEVICE_HOST;
   props->netDeviceVersion = NCCL_NET_DEVICE_INVALID_VERSION;
   props->maxP2pBytes = NCCL_MAX_NET_SIZE_BYTES;
+  props->maxCollBytes = MAX_COLLNET_SIZE;
+  props->maxMultiRequestSize = 1;
   return ncclSuccess;
 }
 
@@ -193,8 +204,8 @@ struct ncclNetSocketThreadResources {
   int stop;
   struct ncclNetSocketComm* comm;
   struct ncclProfilerInfo* pInfo;
-  pthread_mutex_t threadLock;
-  pthread_cond_t  threadCond;
+  std::mutex threadMutex;
+  std::condition_variable threadCond;
 };
 
 struct ncclNetSocketListenComm {
@@ -215,7 +226,7 @@ struct ncclNetSocketComm {
   int nextSock;
   void* inlineData;
   struct ncclNetSocketRequest requests[MAX_REQUESTS];
-  pthread_t helperThread[MAX_THREADS];
+  std::thread helperThread[MAX_THREADS];
   struct ncclNetSocketThreadResources threadResources[MAX_THREADS];
 };
 
@@ -241,7 +252,7 @@ void* persistentSocketThread(void *args_) {
             if (!eHandle[i+j]) {
               ncclProfilerNetSockDescr_v1_t data;
               data.type = ncclProfileSocket;
-              data.sock.fd = r->sock->fd;
+              data.sock.fd = r->sock->socketDescriptor;
               data.sock.op = r->op;
               data.sock.length = r->size;
               ncclProfilerFunction(&eHandle[i+j], ncclProfilerNetEventStart, resource->pInfo->pHandle, NCCL_PROFILER_NET_TYPE_SOCK | 1, &data);
@@ -269,11 +280,8 @@ void* persistentSocketThread(void *args_) {
       } while (repeat);
     }
     if (idle) {
-      pthread_mutex_lock(&resource->threadLock);
-      while (mark == myQueue->next && resource->stop == 0) { // no new tasks, wait
-        pthread_cond_wait(&resource->threadCond, &resource->threadLock);
-      }
-      pthread_mutex_unlock(&resource->threadLock);
+      std::unique_lock<std::mutex> lock(resource->threadMutex);
+      resource->threadCond.wait(lock, [&] { return mark != myQueue->next || resource->stop; });
     }
     if (resource->stop) return NULL;
   }
@@ -335,7 +343,7 @@ fail:
   goto exit;
 }
 
-ncclResult_t ncclNetSocketListen(int dev, void* opaqueHandle, void** listenComm) {
+ncclResult_t ncclNetSocketListen(void* ctx, int dev, void* opaqueHandle, void** listenComm) {
   if (dev < 0 || dev >= ncclNetIfs) { // data transfer socket is based on specified dev
     WARN("NET/Socket : ncclNetSocketListen dev=%d ncclNetIfs=%d", dev, ncclNetIfs);
     return ncclInternalError;
@@ -364,7 +372,7 @@ fail:
 }
 
 #define SOCKET_CTRL_SIZE (sizeof(int))
-ncclResult_t ncclNetSocketConnect(int dev, ncclNetCommConfig_t* config, void* opaqueHandle, void** sendComm, ncclNetDeviceHandle_t** /*sendDevComm*/) {
+ncclResult_t ncclNetSocketConnect(void* ctx, int dev, void* opaqueHandle, void** sendComm, ncclNetDeviceHandle_t** /*sendDevComm*/) {
   if (dev < 0 || dev >= ncclNetIfs) { // data transfer socket is based on specified dev
     return ncclInternalError;
   }
@@ -380,7 +388,7 @@ ncclResult_t ncclNetSocketConnect(int dev, ncclNetCommConfig_t* config, void* op
   if (stage->state == ncclNetSocketCommStateConnect) goto socket_connect_check;
   if (stage->state == ncclNetSocketCommStateSend) goto socket_send;
 
-  NCCLCHECK(ncclCalloc(&comm, 1));
+  comm = new ncclNetSocketComm();
   stage->comm = comm;
   comm->nSocks = handle->nSocks;
   comm->nThreads = handle->nThreads;
@@ -422,7 +430,7 @@ ncclResult_t ncclNetSocketAccept(void* listenComm, void** recvComm, ncclNetDevic
   if (stage->state == ncclNetSocketCommStateAccept) goto socket_accept_check;
   if (stage->state == ncclNetSocketCommStateRecv) goto socket_recv;
 
-  NCCLCHECK(ncclCalloc(&rComm, 1));
+  rComm = new ncclNetSocketComm();
   stage->comm = rComm;
   rComm->nSocks = lComm->nSocks;
   rComm->nThreads = lComm->nThreads;
@@ -449,9 +457,9 @@ socket_recv:
     if (done == 0) return ncclSuccess;
 
     if (sendSockIdx == rComm->nSocks)
-      memcpy(&rComm->ctrlSock, sock, sizeof(struct ncclSocket));
+      rComm->ctrlSock = *sock;
     else
-      memcpy(rComm->socks+sendSockIdx, sock, sizeof(struct ncclSocket));
+      rComm->socks[sendSockIdx] = *sock;
     free(sock);
   }
   NCCLCHECK(ncclCalloc(&rComm->inlineData, MAX_REQUESTS * (SOCKET_CTRL_SIZE + ncclParamSocketInlineSize())));
@@ -501,9 +509,7 @@ ncclResult_t ncclNetSocketGetTask(struct ncclNetSocketComm* comm, struct ncclPro
 #ifdef NCCL_ENABLE_NET_PROFILING
     res->pInfo = pInfo;
 #endif
-    pthread_mutex_init(&res->threadLock, NULL);
-    pthread_cond_init(&res->threadCond, NULL);
-    PTHREADCHECK(pthread_create(comm->helperThread+tid, NULL, persistentSocketThread, res), "pthread_create");
+    comm->helperThread[tid] = std::thread(persistentSocketThread, res);
     ncclSetThreadName(comm->helperThread[tid], "NCCL Sock%c%1u%2u%2u", op == NCCL_SOCKET_SEND ? 'S' : 'R', comm->dev, tid, comm->cudaDev);
   }
   struct ncclNetSocketTask* r = queue->tasks+queue->next;
@@ -517,10 +523,9 @@ ncclResult_t ncclNetSocketGetTask(struct ncclNetSocketComm* comm, struct ncclPro
     comm->nextSock = (comm->nextSock + 1) % comm->nSocks;
     r->used = 1;
     *req = r;
-    pthread_mutex_lock(&res->threadLock);
+    std::lock_guard<std::mutex> lock(res->threadMutex);
     queue->next = (queue->next+1)%queue->len;
-    pthread_cond_signal(&res->threadCond);
-    pthread_mutex_unlock(&res->threadLock);
+    res->threadCond.notify_one();
     return ncclSuccess;
   }
   WARN("NET/Socket : unable to allocate subtasks");
@@ -613,7 +618,7 @@ ncclResult_t ncclNetSocketTest(void* request, int* done, int* size) {
       if (!r->pInfo.eHandle) {
         ncclProfilerNetSockDescr_v1_t data;
         data.type = ncclProfileSocket;
-        data.sock.fd = r->ctrlSock->fd;
+        data.sock.fd = r->ctrlSock->socketDescriptor;
         data.sock.op = r->op;
         data.sock.length = r->size;
         ncclProfilerFunction(&r->pInfo.eHandle, ncclProfilerNetEventStart, r->pInfo.pHandle, NCCL_PROFILER_NET_TYPE_SOCK | 1, &data);
@@ -685,12 +690,13 @@ ncclResult_t ncclNetSocketClose(void* opaqueComm) {
   if (comm) {
     for (int i=0; i<comm->nThreads; i++) {
       struct ncclNetSocketThreadResources* res = comm->threadResources+i;
-      if (comm->helperThread[i]) {
-        pthread_mutex_lock(&res->threadLock);
-        res->stop = 1;
-        pthread_cond_signal(&res->threadCond);
-        pthread_mutex_unlock(&res->threadLock);
-        PTHREADCHECK(pthread_join(comm->helperThread[i], NULL), "pthread_join");
+      if (comm->helperThread[i].joinable()) {
+        {
+          std::lock_guard<std::mutex> lock(res->threadMutex);
+          res->stop = 1;
+          res->threadCond.notify_one();
+        }
+        comm->helperThread[i].join();
       }
       free(res->threadTaskQueue.tasks);
     }
@@ -702,8 +708,13 @@ ncclResult_t ncclNetSocketClose(void* opaqueComm) {
       if (ready) NCCLCHECK(ncclSocketClose(&comm->socks[i]));
     }
     if(comm->inlineData) free(comm->inlineData);
-    free(comm);
+    delete comm;
   }
+  return ncclSuccess;
+}
+
+ncclResult_t ncclNetSocketFinalize(void* ctx) {
+  netRefCount--;
   return ncclSuccess;
 }
 
@@ -727,5 +738,7 @@ ncclNet_t ncclNetSocket = {
   ncclNetSocketCloseListen,
   NULL /* getDeviceMr */,
   NULL /* irecvConsumed */,
-  NULL /* mergeDevices */
+  NULL /* mergeDevices */,
+  ncclNetSocketFinalize,
+  NULL /* setNetAttr */,
 };

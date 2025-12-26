@@ -19,16 +19,17 @@ OBJDIR := $(BUILDDIR)/obj/device
 MANIFEST := $(OBJDIR)/manifest
 DEVGLUE_OBJ  := $(OBJDIR)/device_glue.o
 
-INCFLAGS  = -I. -I.. -I$(BUILDDIR)/include -I../include
+INCFLAGS  = -I. -I.. -I$(BUILDDIR)/include -I../include -I../include/plugin
 NVCUFLAGS += $(INCFLAGS) --compiler-options "-fPIC -fvisibility=hidden"
 CXXFLAGS  += $(INCFLAGS)
 
-NVCUFLAGS_SYM := -ccbin $(CXX) $(CXXSTD) --expt-extended-lambda -Xptxas -maxrregcount=128 -Xfatbin -compress-all
+NVCUFLAGS_SYM += -ccbin $(CXX) $(CXXSTD) --expt-extended-lambda -Xptxas -maxrregcount=128 -Xfatbin -compress-all
 NVCUFLAGS_SYM += $(INCFLAGS) --compiler-options "-fPIC -fvisibility=hidden"
 
 SAY = @bash -c 'path="$$2"; [[ "$$(realpath "$$2")" =~ ^$(subst .,\.,$(abspath $(NCCLDIR)))/(.*)$$ ]] && path="$${BASH_REMATCH[1]}"; printf "%-15s %s\n" "$$1" "$$path"' SAY
 
 COMPILE.cu = $(NVCC) $(NVCUFLAGS) -dc $2 -o $1
+COMPILE.kernel = $(NVCC) $(NVCUFLAGS) -dw $2 -o $1
 COMPILE.cc = $(CXX) $(CXXFLAGS) -c $2 -o $1
 define COMPILE
 @$(SAY) "Compiling" $2;\
@@ -47,7 +48,11 @@ endif
 define COMPILE_SYM
 @$(SAY) "Compiling" $2;\
  mkdir -p $(dir $1);\
- $(NVCC) $(NVCUFLAGS_SYM) $3 -dw $2 -o $1
+ if [[ -n "$3" ]]; then\
+ $(NVCC) $(NVCUFLAGS_SYM) $3 -dw $2 -o $1;\
+ else\
+ touch $2.empty.cu; $(NVCC) $(NVCUFLAGS_SYM) -dw $2.empty.cu -o $1; rm $2.empty.cu;\
+ fi
 endef
 
 DEPENDS.cu = $(NVCC) $(NVCUFLAGS) -M -dc $1

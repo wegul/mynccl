@@ -49,11 +49,12 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommInitRank, static c
   )
 )
 // The typedef and payload schema for ncclCommInitRank is also used for,
-// ncclCommInitRankConfig, ncclCommInitRankScalable, ncclCommDestroy, and ncclCommAbort.
+// ncclCommInitRankConfig, ncclCommInitRankScalable, ncclCommDestroy, ncclCommAbort, and ncclCommRevoke.
 typedef NcclNvtxParamsCommInitRank NcclNvtxParamsCommInitRankConfig;
 typedef NcclNvtxParamsCommInitRank NcclNvtxParamsCommInitRankScalable;
 typedef NcclNvtxParamsCommInitRank NcclNvtxParamsCommAbort;
 typedef NcclNvtxParamsCommInitRank NcclNvtxParamsCommDestroy;
+typedef NcclNvtxParamsCommInitRank NcclNvtxParamsCommRevoke;
 
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommSplit, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
@@ -77,6 +78,16 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommShrink, static con
   )
 )
 
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommGrow, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, newcomm, TYPE_UINT64, nccl_nvtxCommStr),
+    (uint64_t, parentcomm, TYPE_UINT64, "Parent NCCL communicator ID"),
+    (int, nranks, TYPE_INT, nccl_nvtxNranksStr),
+    (int, myrank, TYPE_INT, nccl_nvtxRankStr),
+    (int, cudaDev, TYPE_INT, nccl_nvtxCudaDevStr)
+  )
+)
+
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommFinalize, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr)
@@ -84,6 +95,13 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommFinalize, static c
 )
 
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAllGather, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr)
+  )
+)
+
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAlltoAll, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
     (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr)
@@ -99,6 +117,14 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAllReduce, static cons
 )
 
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsBroadcast, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
+    (int, root, TYPE_INT, "Root")
+  )
+)
+
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsGather, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
     (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
@@ -123,12 +149,45 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsReduceScatter, static 
   )
 )
 
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsScatter, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
+    (int, root, TYPE_INT, "Root")
+  )
+)
+
 // Used in NCCL APIs `ncclSend` and `ncclRecv`.
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsSendRecv, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
     (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
     (int, peer, TYPE_INT, "Peer rank")
+  )
+)
+
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsPut, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
+    (int, peer, TYPE_INT, "Peer rank"),
+    (int, ctx, TYPE_INT, "Context ID")
+  )
+)
+
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsSignal, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (int, peer, TYPE_INT, "Peer rank"),
+    (int, ctx, TYPE_INT, "Context ID")
+  )
+)
+
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsWaitSignal, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
+    (int, npeers, TYPE_INT, "Number of peers"),
+    (int, ctx, TYPE_INT, "Context ID")
   )
 )
 

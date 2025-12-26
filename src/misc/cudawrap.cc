@@ -9,6 +9,7 @@
 #include "debug.h"
 #include "param.h"
 #include "cudawrap.h"
+#include <mutex>
 
 // This env var (NCCL_CUMEM_ENABLE) toggles cuMem API usage
 NCCL_PARAM(CuMemEnable, "CUMEM_ENABLE", -2);
@@ -153,6 +154,12 @@ DECLARE_CUDA_PFN(cuMulticastCreate, 12010);
 DECLARE_CUDA_PFN(cuMulticastGetGranularity, 12010);
 DECLARE_CUDA_PFN(cuMulticastUnbind, 12010);
 #endif
+/* Stream MemOp support */
+DECLARE_CUDA_PFN(cuStreamBatchMemOp, 11070);
+DECLARE_CUDA_PFN(cuStreamWaitValue32, 11070);
+DECLARE_CUDA_PFN(cuStreamWaitValue64, 11070);
+DECLARE_CUDA_PFN(cuStreamWriteValue32, 11070);
+DECLARE_CUDA_PFN(cuStreamWriteValue64, 11070);
 #endif
 
 #define CUDA_DRIVER_MIN_VERSION 11030
@@ -165,7 +172,7 @@ bool ncclCudaLaunchBlocking = false;
 #if CUDART_VERSION >= 13000
 #define LOAD_SYM(symbol, version, ignore) do {                           \
     cudaDriverEntryPointQueryResult driverStatus = cudaDriverEntryPointSymbolNotFound; \
-    res = cudaGetDriverEntryPointByVersion(#symbol, (void **) (&pfn_##symbol), version, cudaEnableDefault, &driverStatus); \
+    res = CUDACLEARERROR(cudaGetDriverEntryPointByVersion(#symbol, (void **) (&pfn_##symbol), version, cudaEnableDefault, &driverStatus)); \
     if (res != cudaSuccess || driverStatus != cudaDriverEntryPointSuccess) { \
       if (!ignore) {                                                    \
         WARN("Retrieve %s version %d failed with %d status %d", #symbol, version, res, driverStatus); \
@@ -174,7 +181,7 @@ bool ncclCudaLaunchBlocking = false;
 #elif CUDART_VERSION >= 12000
 #define LOAD_SYM(symbol, version, ignore) do {                           \
     cudaDriverEntryPointQueryResult driverStatus = cudaDriverEntryPointSymbolNotFound; \
-    res = cudaGetDriverEntryPoint(#symbol, (void **) (&pfn_##symbol), cudaEnableDefault, &driverStatus); \
+    res = CUDACLEARERROR(cudaGetDriverEntryPoint(#symbol, (void **) (&pfn_##symbol), cudaEnableDefault, &driverStatus)); \
     if (res != cudaSuccess || driverStatus != cudaDriverEntryPointSuccess) { \
       if (!ignore) {                                                    \
         WARN("Retrieve %s failed with %d status %d", #symbol, res, driverStatus); \
@@ -182,7 +189,7 @@ bool ncclCudaLaunchBlocking = false;
     } } while(0)
 #else
 #define LOAD_SYM(symbol, version, ignore) do {                           \
-    res = cudaGetDriverEntryPoint(#symbol, (void **) (&pfn_##symbol), cudaEnableDefault); \
+    res = CUDACLEARERROR(cudaGetDriverEntryPoint(#symbol, (void **) (&pfn_##symbol), cudaEnableDefault)); \
     if (res != cudaSuccess) { \
       if (!ignore) {                                                    \
         WARN("Retrieve %s failed with %d", #symbol, res);               \
@@ -238,11 +245,17 @@ static ncclResult_t cudaPfnFuncLoader(void) {
   LOAD_SYM(cuMulticastGetGranularity, 12010, 1);
   LOAD_SYM(cuMulticastUnbind, 12010, 1);
 #endif
+/* Stream MemOp support */
+  LOAD_SYM(cuStreamBatchMemOp, 11070, 1);
+  LOAD_SYM(cuStreamWaitValue32, 11070, 1);
+  LOAD_SYM(cuStreamWaitValue64, 11070, 1);
+  LOAD_SYM(cuStreamWriteValue32, 11070, 1);
+  LOAD_SYM(cuStreamWriteValue64, 11070, 1);
   return ncclSuccess;
 }
 #endif
 
-static pthread_once_t initOnceControl = PTHREAD_ONCE_INIT;
+static std::once_flag initOnceFlag;
 static ncclResult_t initResult;
 
 static void initOnceFunc() {
@@ -295,6 +308,22 @@ error:
 }
 
 ncclResult_t ncclCudaLibraryInit() {
-  pthread_once(&initOnceControl, initOnceFunc);
+  std::call_once(initOnceFlag, initOnceFunc);
   return initResult;
+}
+
+// Wrapper for cuStreamBatchMemOp that handles the 255 operations per call limit
+ncclResult_t ncclCuStreamBatchMemOp(cudaStream_t stream, unsigned int numOps, CUstreamBatchMemOpParams* batchParams) {
+  ncclResult_t ret = ncclSuccess;
+  const unsigned int maxOpsPerBatch = 255;
+
+  for (unsigned int offset = 0; offset < numOps; offset += maxOpsPerBatch) {
+    unsigned int opsInThisChunk = (numOps - offset < maxOpsPerBatch) ? (numOps - offset) : maxOpsPerBatch;
+    CUCHECKGOTO(cuStreamBatchMemOp(stream, opsInThisChunk, &batchParams[offset], 0), ret, fail);
+  }
+
+exit:
+  return ret;
+fail:
+  goto exit;
 }

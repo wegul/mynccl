@@ -8,9 +8,8 @@
 #define NCCL_DEVICE_H_
 
 #include "nccl.h"
-#include "nccl_common.h"
+#include "nccl_tuner.h"
 #include "bitops.h"
-#include "symmetric.h"
 #include <algorithm>
 #include <stdint.h>
 #include <sys/types.h>
@@ -54,7 +53,7 @@ extern const char* ncclProtoStr[NCCL_NUM_PROTOCOLS];
   #define NCCL_CUDA_ARCH_FAMILY_SPECIFIC 0
 #endif
 
-#include "net_device.h"
+#include "nccl_device/net_device.h"
 
 enum ncclDevRedOp_t {
   ncclDevSum, ncclDevProd, ncclDevMinMax,
@@ -154,11 +153,13 @@ struct ncclProxyConnector {
   int sameProcess;
   struct ncclProxyConnection* connection;
   ncclResult_t (*proxyProgress)(struct ncclProxyState* proxyState, struct ncclProxyArgs*); // Copied from transport if necessary
+  ncclResult_t (*proxyGinProgress)(struct ncclProxyState* proxyState);
 };
 
 struct ncclConnector {
   int connected;
   int hasSeen;
+  int p2pOnly;
   struct ncclProxyConnector proxyConn;
   struct ncclTransportComm* transportComm;
   void* transportResources;
@@ -174,7 +175,8 @@ struct ncclRing {
   // since we need to know how the user expects data to be ordered across
   // devices. Ordered from current device.
   int* userRanks;
-
+  // Maps a user rank to an internal ring index.
+  int* rankToIndex;  // inverse lookup of userRanks, setup in setupChannel
   int index; // This rank's index in the ring
 };
 
@@ -228,7 +230,7 @@ struct ncclChannelPeer {
   int refCount;
 };
 
-struct ncclDevComm;
+struct ncclKernelComm;
 
 struct alignas(16) ncclDevWorkP2p {
   void *sendAddr, *recvAddr;
@@ -267,16 +269,10 @@ inline __host__ uint8_t ncclP2pChannelBaseForRound(struct ncclComm* comm, int p2
 // ncclP2pChannelToPart and ncclP2pChannelForPart are inverses. The device code
 // uses ncclP2pChannelToPart to determine which part "this" channel is responsible for.
 inline __host__ int ncclP2pChannelForPart(int nP2pChannels, int base, int part) {
-  // Only works because nP2pChannels is pow2
-  int nChannelsLog2 = countOneBits(nP2pChannels-1);
-  int delta = reverseBits(part, nChannelsLog2);
-  return (base + delta) & (nP2pChannels-1);
+  return (base + part) & (nP2pChannels-1);
 }
 inline __device__ int ncclP2pChannelToPart(int nP2pChannels, int base, int channel) {
-  // Only works because nP2pChannels is pow2
-  int nChannelsLog2 = countOneBits(nP2pChannels-1);
-  int delta = (channel-base) & (nP2pChannels-1);
-  return reverseBits(delta, nChannelsLog2);
+  return (channel - base) & (nP2pChannels-1);
 }
 
 struct alignas(16) ncclDevWorkColl {
@@ -310,6 +306,16 @@ struct alignas(16) ncclDevWorkColl {
   uint64_t redOpArg;
 };
 
+
+struct alignas(16) ncclDevWorkBcast {
+  int ringDepth;
+  int chunkSize;
+  void *sendbuff;
+  void *recvbuff;
+  size_t bytes;
+  size_t bytes_done;
+  uint8_t pad[8];
+};
 
 __host__ __device__ constexpr int ncclProtoGrainSize(int proto) {
   return proto == NCCL_PROTO_LL ? 16 :
@@ -356,12 +362,21 @@ struct alignas(16) ncclDevWorkCollReg {
 enum ncclDevWorkType: uint8_t {
   ncclDevWorkTypeP2p,
   ncclDevWorkTypeColl,
-  ncclDevWorkTypeCollReg
+  ncclDevWorkTypeCollReg,
+  ncclDevWorkTypeBcast,  // for batched broadcast
 };
 
 constexpr size_t ncclDevWorkSize(enum ncclDevWorkType type) {
   return type == ncclDevWorkTypeP2p ? sizeof(ncclDevWorkP2p) :
-         type == ncclDevWorkTypeColl ? sizeof(ncclDevWorkColl) : sizeof(ncclDevWorkCollReg);
+         type == ncclDevWorkTypeColl ? sizeof(ncclDevWorkColl) :
+         type == ncclDevWorkTypeCollReg ? sizeof(ncclDevWorkCollReg) :
+         type == ncclDevWorkTypeBcast ? sizeof(ncclDevWorkBcast): 0;
+}
+
+__host__ __device__ constexpr int ncclMaxDevWorkBatchBytes(int cudaArch = NCCL_CUDA_ARCH) {
+  return cudaArch < 800 ? (1<<10) :
+    cudaArch < 900 ? (8<<10) :
+    (16<<10);
 }
 
 #define NCCL_MAX_DEV_WORK_BATCH_BYTES 1024
@@ -413,7 +428,7 @@ struct ncclDevProfiler {
   } data[MAX_PROFILER_EVENTS_PER_CHANNEL];
 };
 
-struct ncclDevComm {
+struct ncclKernelComm {
   int rank;
   int nRanks;
   int node;
@@ -436,8 +451,8 @@ struct ncclDevComm {
   struct ncclDevProfiler* workCompleted/*[MAXCHANNELS]*/;
 };
 
-struct alignas(16) ncclDevCommAndChannels {
-  struct ncclDevComm comm;
+struct alignas(16) ncclKernelCommAndChannels {
+  struct ncclKernelComm comm;
   struct ncclDevChannel channels[MAXCHANNELS];
 };
 
@@ -448,7 +463,7 @@ enum ncclDevWorkStorageType: uint8_t {
 };
 
 struct alignas(16) ncclDevKernelArgs {
-  struct ncclDevComm* comm;
+  struct ncclKernelComm* comm;
   uint64_t channelMask;
   enum ncclDevWorkStorageType workStorageType;
   uint32_t workMask;
@@ -534,7 +549,8 @@ __host__ __device__ constexpr int ncclShmemDynamicSize(int cudaArch = NCCL_CUDA_
 
 // Host-side table of kernel function pointers.
 extern int const ncclDevKernelCount;
-extern void* const ncclDevKernelList[/*ncclDevKernelCount*/];
+extern void* ncclDevKernelList[/*ncclDevKernelCount*/];
+extern int ncclDevKernelRequirements[/*ncclDevKernelCount*/];
 
 // Table of most specialized kernel function to run given func index.
 extern int const ncclDevFuncRowToId[];
@@ -584,6 +600,13 @@ inline int ncclDevFuncId(int coll, int devRedOp, int type, int algo, int proto) 
 
     nAlgos = 1;
     if (coll == ncclFuncBroadcast) {
+      row += proto;
+      break;
+    }
+    row += nAlgos*NCCL_NUM_PROTOCOLS;
+
+    nAlgos = 1;
+    if (coll == ncclFuncAllGatherV) {
       row += proto;
       break;
     }

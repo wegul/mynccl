@@ -18,6 +18,10 @@
 #include "graph.h"
 #include "profiler.h"
 #include "allocator.h"
+#include "dev_runtime.h"
+#include "sym_kernels.h"
+#include "ce_coll.h"
+#include "rma/rma.h"
 
 #if CUDART_VERSION < 9000
 struct cudaLaunchParams {
@@ -68,16 +72,6 @@ struct ncclRecvMem {
 enum helperThreadState {ThreadStart, ThreadStop};
 
 #define NCCL_IPC_POOL_SIZE (2*NCCL_MAX_LOCAL_RANKS*NCCL_MAX_OPS)
-
-struct ncclGraphHelperResources {
-  ncclComm* comm;
-  pthread_mutex_t threadLock;
-  pthread_cond_t  threadCond;
-  enum helperThreadState threadState;
-  void* ipcBases[NCCL_IPC_POOL_SIZE];
-  int ipcTail;
-  int ipcHead;
-};
 
 struct ncclUserRedOp {
   int freeNext; // -1=allocated, otherwise index of next free entry in array
@@ -137,6 +131,9 @@ struct ncclSharedResources {
 
   /* proxy related shared res */
   struct ncclProxyState* proxyState;
+
+  // GIN state
+  struct ncclGinState ginState;
 };
 
 struct ncclChannel {
@@ -198,12 +195,15 @@ struct ncclTaskColl {
   int32_t nMaxChannels:8;
   int32_t nWarps:8;
   int32_t algorithm:8, protocol:8;
-  uint32_t isCollnet:1, isNvls:1;
-  uint32_t devFuncId:30;
+  uint32_t isCollnet:1, isNvls:1, isSymLast:1;
+  uint32_t devFuncId:29;
   int regBufType;
   // number of elements in planner->ipcMemQueue associated with this collective
   int nCleanupQueueElts;
 
+  struct ncclDevrWindow* sendWin;
+  struct ncclDevrWindow* recvWin;
+  ncclSymRegType_t winRegType;
   void* sendMhandle;
   void* recvMhandle;
   void** sendNetHandles;
@@ -217,20 +217,79 @@ struct ncclTaskColl {
 
   // Profiler plugin
   int eActivationMask;
+  void* groupApiEventHandle;
+  void* collApiEventHandle;
   void* eventHandle;
   uint8_t nChannels;
 };
+
+
+struct ncclTaskBcast {
+  struct ncclTaskBcast* next;
+  ncclFunc_t func;
+  void* recvbuff;
+  const void* sendbuff;
+  size_t count;
+  ncclDataType_t datatype;
+  int root;
+  int ringDepth;
+
+  // what computes after...
+  int32_t algorithm:8, protocol:8;
+
+  // Profiler plugin
+  int eActivationMask;
+  void* groupApiEventHandle;
+  void* collApiEventHandle;
+  void* eventHandle;
+  uint8_t nChannels;
+};
+
 struct ncclTaskP2p {
   struct ncclTaskP2p* next;
   ncclFunc_t func;
+  ncclFunc_t collAPI;
   void* buff;
   size_t count;
   ncclDataType_t datatype;
   int root;
   size_t bytes;
+  bool allowUB;
 
   // Profiler plugin
   int eActivationMask;
+  void* groupApiEventHandle;
+  void* p2pApiEventHandle;
+  void* eventHandle;
+  uint8_t nChannels;
+};
+
+struct ncclTaskRma {
+  struct ncclTaskRma* next;
+  ncclFunc_t func;
+  int ctx;
+  size_t count;
+  ncclDataType_t datatype;
+  size_t bytes;
+
+  void const* srcBuff;
+  size_t srcWinOffset;
+  struct ncclDevrWindow* srcWinHost;
+
+  int peer;
+  size_t peerWinOffset;
+  struct ncclDevrWindow* peerWinHost;
+
+  // Signal operations
+  ncclSignalMode_t signalMode;
+  int*peers;
+  int*nsignals;
+  int npeers;
+
+  // Profiler plugin
+  int eActivationMask;
+  void* groupApiEventHandle;
+  void* rmaApiEventHandle;
   void* eventHandle;
   uint8_t nChannels;
 };
@@ -246,12 +305,16 @@ struct ncclKernelPlan {
   bool persistent; // aka captured in a graph
   bool isHostCbEnq;
   bool isSymColl;
+  bool isCeColl;
+  bool isRma;
   enum ncclDevWorkStorageType workStorageType;
   bool kernelSpecialized;
   void* kernelFn;
   union {
     struct ncclDevKernelArgs* kernelArgs;
-    struct ncclSymDevArgs* kernelSymArgs;
+    void* kernelSymArgs;
+    struct ncclCeCollArgs* ceCollArgs;
+    struct ncclRmaArgs* rmaArgs;
   };
   size_t kernelArgsSize;
   uint64_t channelMask; // bitset of which channels are present
@@ -260,16 +323,22 @@ struct ncclKernelPlan {
 
   int collOpCount; // Number of collectives in this plan.
   int nWorkBatches; // Number of work batches.
+  int nTasksBcast; // Number of bcast tasks in this plan.
   size_t workBytes; // Sum size of all work (in the fifo) in bytes.
   struct ncclIntruQueue<struct ncclWorkList, &ncclWorkList::next> workQueue;
   struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next> cleanupQueue;
   void* workBufPersistent;
 
   struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> p2pTaskQueue;
+  struct ncclIntruQueue<struct ncclTaskBcast, &ncclTaskBcast::next> bcastTaskQueue;
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueProxy;
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueCe;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
 
   // Profiler plugin
+  void* groupApiEventHandle;
+  void* kernelLaunchEventHandle;
   void* groupEventHandle;
 };
 
@@ -356,13 +425,20 @@ struct ncclKernelPlanner {
     bool sendSeen, recvSeen;
     struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> sendQueue;
     struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> recvQueue;
+    struct ncclIntruQueue<struct ncclTaskBcast, &ncclTaskBcast::next> bcastQueue;
   };
   struct ncclTaskCollSorter collSorter;
   struct Peer* peers/*[nRanks]*/;
-  int nTasksColl, nTasksP2p;
-  bool persistent;
-  bool isSymColl;
+  int nTasksColl, nTasksP2p, nTasksBcast, nTasksRma;
+  int nTasksP2pSend, nTasksP2pRecv;
 
+  struct {
+    int minBcastPeer;  /* initialized to INT_MAX */
+    int maxBcastPeer;  /* initialized to INT_MIN */
+    int BcastPeers;  /* initialized to 0 */
+  } bcast_info;
+
+  bool persistent;
   // The list of user streams aggregated over all tasks present.
   struct ncclCudaStreamList* streams;
   // The most recent user stream. Ignored if streams==nullptr
@@ -378,6 +454,9 @@ struct ncclKernelPlanner {
   //////////////////////////////////////////////////////////////////////////////
 
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
+  struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collCeTaskQueue;
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> *rmaTaskQueues; // Per-context queue for RMA tasks
+  struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collSymTaskQueue;
   struct ncclIntruQueue<struct ncclWorkList, &ncclWorkList::next> collWorkQueue;
   struct ncclIntruQueue<struct ncclWorkList, &ncclWorkList::next> tmpCollWorkQueue;
   struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next> collCleanupQueue;
@@ -391,9 +470,12 @@ struct ncclKernelPlanner {
       struct {
         int workBytes; // Sum size of work metadata referenced by this batch.
         int nP2ps; // Number of p2p works in this batch
+        int nBcasts; // Number of bcast works in this batch
+        int p2pEpoch;
         int p2pRounds[NCCL_MAX_DEV_WORK_P2P_PER_BATCH]; // which rounds are present in this batch.
       } wipBatch; // work-in-progress batch which will be next tail of workBatchQueue
       int nWorkBatchesP2p; // number of p2p batches for this channel.
+      int nWorkBatchesBcast; // number of bcast batches for this channel.
       struct ncclIntruQueue<struct ncclWorkBatchList, &ncclWorkBatchList::next> workBatchQueue;
       struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
     } channels[MAXCHANNELS];
@@ -417,6 +499,8 @@ typedef enum ncclGroupTaskType {
   ncclGroupTaskTypeNum = 2,
 } ncclGroupTaskType_t;
 
+struct ncclCommSymTeams;
+
 struct ncclComm {
   uint64_t startMagic;
   struct ncclMemoryStack memPermanent, memScoped;
@@ -434,13 +518,18 @@ struct ncclComm {
   struct ncclProxyConnector* gproxyConn;
   struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next> legacyRegCleanupQueue;
   bool peerInfoValid;
+  float minNetBw;
 
   ncclNet_t* ncclNet;
+  void* netContext;
+  void* ginContext;
   int netPluginIndex;
   int ncclNetVer;
   ncclNetDeviceType netDeviceType;
   ncclCollNet_t* ncclCollNet;
+  void* collNetContext;
   void* bootstrap;
+  bool isGrow; // true if this comm is created via ncclCommGrow
   // Bitmasks for ncclTransportP2pSetup
   uint64_t* connectSend;
   uint64_t* connectRecv;
@@ -448,7 +537,7 @@ struct ncclComm {
   int maxTreePattern;
   bool initAlgoChannels[NCCL_NUM_ALGORITHMS];
   bool runtimeConn; // if dynamic connection is supported
-  bool directMode;
+  bool directMode; // if any process manages more than one local rank
   int cuMemSupport;
 
   uint64_t magic; // Magic number for all network communication. Not a security key -- only goal is to detect mismatches.
@@ -461,7 +550,7 @@ struct ncclComm {
   int compCap; // compute capability of the GPU
   int minCompCap, maxCompCap; // min/max compute capability in the communicator
   int64_t busId;   // my PCI bus ID in int format
-  cpu_set_t cpuAffinity; // CPU affinity of the GPU
+  ncclAffinity cpuAffinity; // CPU affinity of the GPU
   int cudaArch; // matches __CUDA_ARCH__ of device
 
   int cpuArch;   // architecture - As defined in src/include/graph.h, e.g. x86/arm/ppc/mixed
@@ -472,6 +561,7 @@ struct ncclComm {
   int localRank;
   int localRanks;
   int maxLocalRanks;
+  int minLocalRanks;
   int* rankToNode;
   int* rankToLocalRank;
   int* localRankToRank;
@@ -482,8 +572,12 @@ struct ncclComm {
   struct cliqueInfo clique; // Our MNNVL clique information
   int cliqueRank; // Our rank within the MNNVL clique
 
+  // NVL Domain info
+  ncclNvlDomainInfo_v5_t nvlDomainInfo;
+
   bool checkPointers;
   bool dmaBufSupport;
+  bool ccEnable;
 
   // Counter for tracking CUDA launches (P2P and collectives included)
   uint64_t opCount;
@@ -499,6 +593,7 @@ struct ncclComm {
   // Channels (per peer) for p2p
   int p2pnChannels;
   int p2pnChannelsPerPeer;
+  int p2pSchedGroupSize;
 
   // Should this comm allocate LL buffers for network P2P connections?
   bool allocP2pNetLLBuffers;
@@ -508,7 +603,8 @@ struct ncclComm {
   int p2pChunkSize;
   int nvlsChunkSize;
 
-  // Algorithm/Protocols thresholds
+  // Tuner values
+  ncclTunerConstants_t tunerConstants;
   ssize_t threadThresholds[NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];
   float latencies[NCCL_NUM_FUNCTIONS][NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];
   float bandwidths[NCCL_NUM_FUNCTIONS][NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];
@@ -525,10 +621,10 @@ struct ncclComm {
   uint32_t* childAbortFlag;
   uint32_t* childAbortFlagDev;
   uint32_t destroyFlag;
+  uint32_t revokedFlag;
 
   // Device side of the communicator (for cudaFree's)
-  struct ncclDevComm* devComm; // actually = &ncclDevCommAndChannels::comm
-  struct ncclSymDevComm symDevComm;
+  struct ncclKernelComm* devComm; // actually = &ncclKernelCommAndChannels::comm
 
   uint32_t workArgsBytes; // max size of kernel args
   uint32_t workFifoBytes; // size of workFifoBuf, power of 2
@@ -571,10 +667,13 @@ struct ncclComm {
   struct ncclNvlsSharedRes* nvlsResources;
 
   // pools backed by comm->memPermanent
+  struct ncclMemoryPool memPool_ncclTaskBcast;
   struct ncclMemoryPool memPool_ncclTaskColl;
   struct ncclMemoryPool memPool_ncclTaskP2p;
+  struct ncclMemoryPool memPool_ncclTaskRma;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
+  struct ncclMemoryPool memPool_ncclRmaProxyDesc;
 
   // Next comm in this thread's active ncclGroup[Start|End](). Holds "0x1" when
   // this comm is not yet in a group.
@@ -585,6 +684,7 @@ struct ncclComm {
   struct P2pSchedulePair { int sendRank; int recvRank; } *p2pSchedule;
 
   struct ncclKernelPlanner planner;
+  void* ringTasks; // An array of nRanks pointers used in ring sorting rooted collectives (bcast)
 
   cudaMemPool_t memPool;
   // Queue of events and associated callbacks for cleaning up asynchronous work.
@@ -624,21 +724,30 @@ struct ncclComm {
   uint64_t seqNumber[NCCL_NUM_FUNCTIONS];
   struct ncclProfilerProxy profiler;
 
+  // RMA state
+  struct ncclRmaState rmaState;
+  struct ncclIntruQueue<struct ncclRmaCeInitTask, &ncclRmaCeInitTask::next> rmaCeInitTaskQueue;
+
+  // CE Collective
+  struct ncclCeColl ceColl;
+  struct ncclIntruQueue<struct ncclCeInitTask, &ncclCeInitTask::next> ceInitTaskQueue;
+
   // buffer registration cache
   struct ncclRegCache regCache;
   int isAllNvlink;
-  bool isAllDirectP2p;
+  bool isAllDirectP2p; // Subject to NCCL_P2P_LEVEL (for local ranks only).
+  bool isAllCudaP2p; // Raw CUDA capability (for local ranks only).
+  bool isAllDirectNvlink; // All GPUs are directly connected to each other through NVLink.
   int symmetricSupport;
   bool useNetPXN;
   bool useGdr;
-  int splitCount;
-  // symmetric buffer
-  uint8_t* baseUCSymPtr;
-  uint8_t* baseMCSymPtr;
-  size_t baseStride;
-  size_t symAllocHead;
-  CUmemGenericAllocationHandle symMCHandle;
-  struct ncclIntruQueue<struct ncclSymRegTask, &ncclSymRegTask::next> symRegTaskQueue;
+  bool ginSupport;
+  bool rmaProxySupport;
+  int childCount;
+
+  struct ncclDevrState devrState; // The symmetric runtime state
+  struct ncclSymkState symkState; // The symmetric kernels state (built on previous)
+
   uint64_t endMagic;
 };
 
@@ -704,12 +813,12 @@ inline void ncclCommIntraBarrierIn(struct ncclComm* comm, uint32_t x) {
     comm->intraBarrierGate = (uint64_t(x)<<32) | (phase^1);
   } else {
     struct ncclComm* comm0 = comm->intraComm0;
-    uint64_t count = __atomic_add_fetch(&comm0->intraBarrierCounter, (uint64_t(x)<<32) + 1, __ATOMIC_RELEASE);
+    uint64_t count = COMPILER_ATOMIC_ADD_FETCH(&comm0->intraBarrierCounter, (uint64_t(x)<<32) + 1, std::memory_order_release);
     if (uint32_t(count) == uint32_t(comm->intraRanks)) {
       // Reset.
-      __atomic_store_n(&comm0->intraBarrierCounter, 0, __ATOMIC_RELAXED);
+      COMPILER_ATOMIC_STORE(&comm0->intraBarrierCounter, 0, std::memory_order_relaxed);
       // Release everyone.
-      __atomic_store_n(&comm0->intraBarrierGate, (count>>32<<32) | (phase^1), __ATOMIC_RELEASE);
+      COMPILER_ATOMIC_STORE(&comm0->intraBarrierGate, (count>>32<<32) | (phase^1), std::memory_order_release);
     }
   }
 }
@@ -719,16 +828,16 @@ inline uint32_t ncclCommIntraBarrierOut(struct ncclComm* comm) {
   struct ncclComm* comm0 = comm->intraComm0;
   comm->intraBarrierPhase ^= 1;
   uint32_t phase = comm->intraBarrierPhase;
-  uint64_t gate = __atomic_load_n(&comm0->intraBarrierGate, __ATOMIC_RELAXED);
+  uint64_t gate = COMPILER_ATOMIC_LOAD(&comm0->intraBarrierGate, std::memory_order_relaxed);
   if ((gate & 1) != phase) {
     uint64_t t0 = clockNano();
     do {
       // Spin vigorously for first 5us.
-      if (clockNano()-t0 >= 5*1000) sched_yield();
-      gate = __atomic_load_n(&comm0->intraBarrierGate, __ATOMIC_RELAXED);
+      if (clockNano()-t0 >= 5*1000) std::this_thread::yield();
+      gate = COMPILER_ATOMIC_LOAD(&comm0->intraBarrierGate, std::memory_order_relaxed);
     } while ((gate & 1) != phase);
   }
-  if (comm->intraRanks != 1) __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  if (comm->intraRanks != 1) std::atomic_thread_fence(std::memory_order_acquire);
   return gate>>32;
 }
 
