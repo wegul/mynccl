@@ -1,0 +1,39 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-DCUDA_MAJOR=12",
+      "-DCUDA_MINOR=1",
+      "-fPIC",
+      "-fvisibility=hidden",
+      "-Wall",
+      "-Wno-unused-function",
+      "-Wno-sign-compare",
+      "-std=c++14",
+      "-Wvla",
+      "-I",
+      "/usr/local/cuda/include",
+      "-I",
+      "/usr/local/cuda/include/cccl",
+      "-O3",
+      "-g",
+      "-DPROFAPI",
+      "-DDOCA_VERBS_USE_CUDA_WRAPPER",
+      "-DDOCA_VERBS_USE_NET_WRAPPER",
+      "-DNCCL_GIN_PROXY_ENABLE=1",
+      "-DNCCL_OS_LINUX",
+      "-I.",
+      "-I..",
+      "-I/home/suweigao/mynccl/build/include",
+      "-I../include",
+      "-I../include/plugin",
+      "-c",
+      "-o",
+      "/home/suweigao/mynccl/build/obj/device/genobj/symmetric/sym_kernels_host.cc.o",
+      "/home/suweigao/mynccl/build/obj/device/gensrc/symmetric/sym_kernels_host.cc"
+    ],
+    "directory": "/home/suweigao/mynccl/src/device",
+    "file": "/home/suweigao/mynccl/build/obj/device/gensrc/symmetric/sym_kernels_host.cc",
+    "output": "/home/suweigao/mynccl/build/obj/device/genobj/symmetric/sym_kernels_host.cc.o"
+  }
+]

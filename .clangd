@@ -7,6 +7,9 @@ CompileFlags:
     
     # Standard system includes
     - -I/home/suweigao/mynccl/src/include
+    - -I/home/suweigao/mynccl/src/include/plugin
+    - -I/home/suweigao/mynccl/src/include/os
+    - -I/home/suweigao/mynccl/build/include
     - -I/usr/local/cuda/include
     - -I/usr/include
     - -I/usr/include/c++/11
@@ -68,6 +71,10 @@ Diagnostics:
     - modernize-use-auto
     - readability-implicit-bool-conversion
     - bugprone-integer-division
+    - unknown_typename        # e.g., uint64_t in net_v11.h
+    - undeclared_var_use      # e.g., NCCL_NET_MAX_DEVS_PER_NIC in net_v11.h
+    - static_assert_requirement_failed      # e.g., sizeof(ncclIbNetCommBase) checks in net_ib
+    - static_assert_expression_is_not_constant
     
   ClangTidy:
     Add:
