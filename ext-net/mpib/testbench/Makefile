@@ -14,12 +14,12 @@ INCLUDES    := -I$(ROOT)/src -I$(ROOT)/ext-net/mpib/nccl
 LIBS        := -L$(ROOT)/build/lib -lnccl
 
 # Binaries to build (you will implement these later)
-BINARIES := mock_gpu_mpib ctrl_server_mpib
+BINARIES := endpoint_mpib ctrl_server_mpib
 
 build: $(BINARIES)
 
-mock_gpu_mpib: mock_gpu.cpp
-	@echo "[TODO] Compile mock_gpu_mpib once mock_gpu.cpp is implemented"
+endpoint_mpib: endpoint.cpp
+	@echo "[TODO] Compile endpoint_mpib once endpoint.cpp is implemented"
 	@mkdir -p $(BUILDDIR)
 	@# Example compile line (uncomment and adjust later):
 	@# $(CXX) $(CXXFLAGS) $(INCLUDES) -o $(BUILDDIR)/$@ $^ $(LIBS) $(LDFLAGS)

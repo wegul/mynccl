@@ -1,7 +1,7 @@
 // mpib testbench: simple control server
 // This file is a skeleton modeled after ext-net/gnic/testbench/ctrl_server.cpp.
 // It is responsible only for exchanging opaque ncclNet connection handles
-// between multiple mock_gpu_mpib processes.
+// between multiple endpoint_mpib processes.
 
 #include <arpa/inet.h>
 #include <condition_variable>

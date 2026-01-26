@@ -4,7 +4,7 @@ This document summarizes several "fancy" InfiniBand/RoCE features used by the NC
 
 ---
 
-## 1. Merged Devices (Virtual NIC / Multi‑Rail)
+## 1. Merged Devices (Virtual NIC / Multi-NIC / Multi-Port)
 
 **Goal:** Present multiple physical ports/NICs as one logical "virtual" NIC and use their combined bandwidth.
 
@@ -16,7 +16,7 @@ This document summarizes several "fancy" InfiniBand/RoCE features used by the NC
   - `vProps.ndevs`: how many physical devices are in this virtual NIC.
   - `speed`: the sum of the member links' speeds.
   - `devName`: a composite name like `mlx5_0+mlx5_1`.
-- When a communicator is created on such a virtual device, NCCL can use multiple underlying rails (ports/NICs) for the same logical connection, improving aggregate bandwidth and resilience.
+- When a communicator is created on such a virtual device, NCCL can use multiple underlying ports/NICs for the same logical connection, improving aggregate bandwidth and resilience.
 
 ### How it is built
 
@@ -25,7 +25,7 @@ This document summarizes several "fancy" InfiniBand/RoCE features used by the NC
   - Sums speed and concatenates names for each underlying device.
   - Checks that all member devices share the same link layer (all IB or all RoCE). If not, merging is rejected.
 - The table of merged devices is stored in `ncclIbMergedDevs[MAX_IB_VDEVS]` (`src/transport/net_ib/common.cc` / `common.h`).
-- Later in connection setup (`src/transport/net_ib/connect.cc`), the send/recv comms copy `mergedDev->vProps` into their base structure so the multi‑rail layout is known on both sides.
+- Later in connection setup (`src/transport/net_ib/connect.cc`), the send/recv comms copy `mergedDev->vProps` into their base structure so the multi-device layout is known on both sides.
 
 ### Configuration knobs
 
@@ -34,9 +34,9 @@ This document summarizes several "fancy" InfiniBand/RoCE features used by the NC
   - When non‑zero, `net_ib` is allowed to build virtual devices that span several physical devices.
 - **`NCCL_IB_HCA`**:
   - Filters which HCAs/ports are even considered for merging (whitelist/blacklist syntax).
-  - Useful to restrict merging to a subset of NICs or to force only a given rail to be used.
+  - Useful to restrict merging to a subset of NICs or to force only a given NIC/port to be used.
 
-**Effect on behavior:** once merged devices are enabled, NCCL will create communicators where each logical `net_ib` device can internally fan out over up to `NCCL_IB_MAX_DEVS_PER_NIC` underlying rails, and the reported link speed is the aggregated speed.
+**Effect on behavior:** once merged devices are enabled, NCCL will create communicators where each logical `net_ib` device can internally fan out over up to `NCCL_IB_MAX_DEVS_PER_NIC` underlying devices (ports/NICs), and the reported link speed is the aggregated speed.
 
 ---
 

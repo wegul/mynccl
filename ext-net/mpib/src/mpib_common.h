@@ -1,0 +1,346 @@
+#pragma once
+
+#include "ibvwrap.h"
+#include "mpib_compat.h"
+#include "mpib_param.h"
+#include "mpib_socket.h"
+#include "mpib_utils.h"
+
+#include <assert.h>
+#include <mutex>
+#include <poll.h>
+#include <sys/types.h>
+#include <thread>
+#include <unistd.h>
+
+ncclResult_t mpibRtsQp(struct ibv_qp *qp);
+
+#define MAXSUFFIXSIZE 16
+#define MAXNAMESIZE (64 + MAXSUFFIXSIZE)
+
+extern char mpibIfName[MPIB_MAX_IF_NAME_SIZE + 1];
+extern union mpibSocketAddress mpibIfAddr;
+
+struct mpibMr {
+  uintptr_t addr;
+  size_t pages;
+  int refs;
+  ibv_mr *mr;
+};
+
+struct mpibMrCache {
+  struct mpibMr *slots;
+  int capacity, population;
+};
+
+extern int mpibNMergedIbDevs;
+#define MPIB_IB_MAX_DEVS_PER_NIC 4
+#define MAX_MERGED_DEV_NAME                                                    \
+  (MAXNAMESIZE * MPIB_IB_MAX_DEVS_PER_NIC) + MPIB_IB_MAX_DEVS_PER_NIC
+struct alignas(64) mpibMergedDev {
+  ncclNetVDeviceProps_t vProps;
+  int speed;
+  char devName[MAX_MERGED_DEV_NAME];
+};
+
+struct mpibStats {
+  int fatalErrorCount;
+};
+
+enum mpibProvider {
+  IB_PROVIDER_NONE = 0,
+  IB_PROVIDER_MLX5 = 1,
+  IB_PROVIDER_MAX = 2,
+};
+
+extern int mpibNIbDevs;
+struct alignas(64) mpibDev {
+  std::mutex mutex;
+  int device;
+  uint64_t guid;
+  uint8_t portNum;
+  uint8_t link;
+  int speed;
+  ibv_context *context;
+  int pdRefs;
+  ibv_pd *pd;
+  char devName[MAXNAMESIZE];
+  char *pciPath;
+  char *virtualPciPath;
+  int realPort;
+  int maxQp;
+  float latency;
+  struct mpibMrCache mrCache;
+  int ar;
+  struct ibv_port_attr portAttr;
+  struct mpibStats stats;
+  enum mpibProvider ibProvider;
+};
+
+#define MAX_IB_DEVS 32
+#define MAX_IB_VDEVS MAX_IB_DEVS * 8
+extern struct mpibMergedDev mpibMergedDevs[MAX_IB_VDEVS];
+extern struct mpibDev mpibDevs[MAX_IB_DEVS];
+extern int mpibRelaxedOrderingEnabled;
+
+#define MPIB_IB_LLSTR(ll)                                                      \
+  (((ll) == IBV_LINK_LAYER_INFINIBAND)                                         \
+       ? "IB"                                                                  \
+       : (((ll) == IBV_LINK_LAYER_ETHERNET) ? "RoCE" : "UNSPECIFIED"))
+
+struct mpibDevInfo {
+  uint32_t lid;
+  uint8_t ib_port;
+  enum ibv_mtu mtu;
+  uint8_t link_layer;
+  union ibv_gid gid;
+  uint32_t rkey;
+  union ibv_gid remoteGid;
+};
+
+struct mpibGidInfo {
+  uint8_t link_layer;
+  union ibv_gid localGid;
+  int32_t localGidIndex;
+};
+
+#define MAX_QPS_PER_REQ 8
+struct mpibProfilerInfo {
+  void *qpEventHandles[MAX_QPS_PER_REQ];
+  int qpIndex[MAX_QPS_PER_REQ];
+  int nEventHandles;
+  void *pHandle;
+};
+
+#define MPIB_NET_IB_MAX_RECVS 8
+#define MPIB_IB_MAX_QPS 128
+
+#define MPIB_NET_IB_REQ_UNUSED 0
+#define MPIB_NET_IB_REQ_SEND 1
+#define MPIB_NET_IB_REQ_RECV 2
+#define MPIB_NET_IB_REQ_FLUSH 3
+#define MPIB_NET_IB_REQ_GIN_IPUT 4
+extern const char *mpibReqTypeStr[];
+
+struct mpibRequest {
+  struct mpibNetCommBase *base;
+  int type;
+  struct mpibSocket *sock;
+  int events[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibNetCommDevBase *devBases[MPIB_IB_MAX_DEVS_PER_NIC];
+#ifdef NCCL_ENABLE_NET_PROFILING
+  struct mpibProfilerInfo pInfo[MPIB_NET_IB_MAX_RECVS];
+#endif
+  int nreqs;
+  union {
+    struct {
+      int size;
+      void *data;
+      uint32_t lkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+      int offset;
+    } send;
+    struct {
+      int *sizes;
+    } recv;
+    struct {
+      int rank;
+    } iput;
+  };
+};
+
+struct mpibNetCommDevBase {
+  int ibDevN;
+  struct ibv_pd *pd;
+  struct ibv_cq *cq;
+  uint64_t pad[2];
+  struct mpibGidInfo gidInfo;
+};
+
+struct mpibSendFifo {
+  uint64_t addr;
+  uint64_t size;
+  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+  uint32_t nreqs;
+  uint32_t tag;
+  uint64_t idx;
+  char padding[16];
+};
+
+struct mpibQp {
+  struct ibv_qp *qp;
+  int devIndex;
+  int remDevIdx;
+};
+
+#define NET_IB_MAX_REQUESTS (NCCL_NET_MAX_REQUESTS * MPIB_NET_IB_MAX_RECVS)
+static_assert(NET_IB_MAX_REQUESTS <= 256,
+              "request id are encoded in wr_id and we need up to 8 requests "
+              "ids per completion");
+
+struct mpibRemCompletionsRecords {
+  int elems[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+  uint64_t addr;
+  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+};
+
+struct alignas(8) mpibSendCommDev {
+  struct mpibNetCommDevBase base;
+  struct ibv_sge sge;
+  struct ibv_mr *ctsFifoMr;
+  struct ibv_mr *cmplsRecordsMr;
+  struct ibv_mr *putSignalScratchpadMr;
+};
+
+// Wrapper to track an MR per-device
+struct mpibMrHandle {
+  ibv_mr *mrs[MPIB_IB_MAX_DEVS_PER_NIC];
+};
+
+struct mpibNetCommBase {
+  int dev;
+  struct mpibQp qps[MPIB_IB_MAX_QPS];
+  uint64_t fifoHead;
+  int nqps;
+  int splitDataOnQps;
+  struct mpibSocket sock;
+  int ready;
+  int isSend;
+  int nRemDevs;
+  int nDataQps;
+  struct mpibDevInfo remDevs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibStats stats;
+  ncclNetVDeviceProps_t vProps;
+  struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
+};
+
+struct mpibSendComm {
+  struct mpibNetCommBase base;
+  struct mpibSendFifo ctsFifo[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+  struct ibv_sge sges[MPIB_NET_IB_MAX_RECVS];
+  struct ibv_send_wr wrs[MPIB_NET_IB_MAX_RECVS + 1];
+  struct mpibSendCommDev devs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibRequest *fifoReqs[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+  struct mpibRemCompletionsRecords remCmplsRecords;
+  int ar;
+  uint64_t putSignalScratchpad;
+};
+
+static_assert((sizeof(struct mpibNetCommBase) % 32) == 0,
+              "mpibNetCommBase size must be 32-byte multiple to ensure "
+              "ctsFifo is at proper offset");
+static_assert((offsetof(struct mpibSendComm, ctsFifo) % 32) == 0,
+              "mpibSendComm ctsFifo must be 32-byte aligned");
+static_assert((sizeof(struct mpibSendFifo) % 32) == 0,
+              "mpibSendFifo element size must be 32-byte multiples");
+static_assert((offsetof(struct mpibSendComm, sges) % 32) == 0,
+              "sges must be 32-byte aligned");
+static_assert((offsetof(struct mpibSendComm, wrs) % 32) == 0,
+              "wrs must be 32-byte aligned");
+
+struct mpibRemCtsFifo {
+  struct mpibSendFifo elems[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+  uint64_t addr;
+  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+  uint32_t flags;
+};
+
+struct alignas(16) mpibRecvCommDev {
+  struct mpibNetCommDevBase base;
+  struct ibv_mr *ctsFifoMr;
+  struct ibv_mr *cmplsRecordsMr;
+  struct ibv_sge sge;
+};
+
+struct mpibRecvComm {
+  struct mpibNetCommBase base;
+  struct mpibRecvCommDev devs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibRemCtsFifo remCtsFifo;
+  int cmplsRecords[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+};
+
+static_assert((offsetof(struct mpibRecvComm, remCtsFifo) % 32) == 0,
+              "mpibRecvComm ctsFifo must be 32-byte aligned");
+
+struct mpibCommStage;
+struct mpibListenComm {
+  int dev;
+  struct mpibSocket sock;
+  struct mpibCommStage *stage;
+};
+
+static inline ncclResult_t mpibStatsInit(struct mpibStats *stat) {
+  COMPILER_ATOMIC_STORE(&stat->fatalErrorCount, 0, std::memory_order_relaxed);
+  return ncclSuccess;
+}
+static void mpibStatsFatalError(struct mpibStats *stat) {
+  COMPILER_ATOMIC_FETCH_ADD(&stat->fatalErrorCount, 1,
+                            std::memory_order_relaxed);
+}
+static void mpibQpFatalError(struct ibv_qp *qp) {
+  mpibStatsFatalError((struct mpibStats *)qp->qp_context);
+}
+static void mpibCqFatalError(struct ibv_cq *cq) {
+  mpibStatsFatalError((struct mpibStats *)cq->cq_context);
+}
+static void mpibDevFatalError(struct mpibDev *dev) {
+  mpibStatsFatalError(&dev->stats);
+}
+ncclResult_t mpibStatsCheckFatalCount(struct mpibStats *stat,
+                                      const char *funcName);
+
+extern ncclProfilerCallback_t mpibProfilerFunction;
+
+extern std::thread mpibAsyncThread;
+void *mpibAsyncThreadMain(void *args);
+
+void mpibAddEvent(struct mpibRequest *req, int devIndex);
+
+struct mpibNetCommDevBase *mpibGetNetCommDevBase(struct mpibNetCommBase *base,
+                                                 int devIndex);
+
+static inline ncclResult_t
+mpibCommBaseGetQpByIndex(struct mpibNetCommBase *commBase, int devIndex,
+                         int qpIndex, struct mpibQp **qp) {
+  assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
+  assert(qpIndex >= 0 && qpIndex < commBase->nDataQps);
+  *qp = &(commBase->qps[commBase->nDataQps * qpIndex + devIndex]);
+  return ncclSuccess;
+}
+
+static inline ncclResult_t
+mpibCommBaseGetQpForRequest(struct mpibNetCommBase *baseComm, const uint32_t id,
+                            const uint8_t qpIndex, struct mpibQp **outQp,
+                            int *outQpIndex) {
+  *outQpIndex = (id + qpIndex) % baseComm->nqps;
+  *outQp = &(baseComm->qps[*outQpIndex]);
+  assert(*outQp != NULL);
+  return ncclSuccess;
+}
+
+static inline int
+mpibCommBaseGetNqpsPerRequest(struct mpibNetCommBase *baseComm) {
+  return (baseComm->splitDataOnQps == 1) ? baseComm->nqps : baseComm->nDataQps;
+}
+
+ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
+                                 void *cq_context);
+ncclResult_t mpibDestroyBase(struct mpibNetCommDevBase *base);
+ncclResult_t mpibCreateQp(uint8_t ib_port, struct mpibNetCommDevBase *base,
+                          int access_flags, void *qp_context,
+                          struct mpibQp *qp);
+ncclResult_t mpibRtrQp(struct ibv_qp *qp, struct mpibGidInfo *sGidInfo,
+                       uint32_t dest_qp_num, struct mpibDevInfo *info,
+                       bool fifoTc, int tc, int sl);
+ncclResult_t mpibRtsQp(struct ibv_qp *qp);
+ncclResult_t mpibGetGidIndex(struct ibv_context *context, uint8_t portNum,
+                             struct ibv_port_attr *portAttr, int *gidIndex);
+
+ncclResult_t mpibGetRequest(struct mpibNetCommBase *base,
+                            struct mpibRequest **req);
+ncclResult_t mpibFreeRequest(struct mpibRequest *r);
+
+ncclResult_t mpibRegMr(void *comm, void *data, size_t size, int type,
+                       void **mhandle);
+ncclResult_t mpibRegMrDmaBuf(void *comm, void *data, size_t size, int type,
+                             uint64_t offset, int fd, void **mhandle);
+ncclResult_t mpibDeregMr(void *comm, void *mhandle);

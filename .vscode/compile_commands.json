@@ -14,5 +14,27 @@
     "directory": "/home/suweigao/mynccl/ext-net/example",
     "file": "/home/suweigao/mynccl/ext-net/example/plugin.c",
     "output": "/home/suweigao/mynccl/ext-net/example/libnccl-net-example.so"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-I/home/suweigao/mynccl/ext-net/mpib/include",
+      "-I/home/suweigao/mynccl/ext-net/mpib/nccl",
+      "-I/usr/local/cuda/include",
+      "-I/usr/local/cuda/include/cccl",
+      "-std=c++17",
+      "-fPIC",
+      "-fvisibility=hidden",
+      "-Wall",
+      "-Wno-unused-function",
+      "-Wno-sign-compare",
+      "-o",
+      "/tmp/clangd_mpib_mpib.o",
+      "/home/suweigao/mynccl/ext-net/mpib/src/mpib.cc"
+    ],
+    "directory": "/home/suweigao/mynccl/ext-net/mpib",
+    "file": "/home/suweigao/mynccl/ext-net/mpib/src/mpib.cc",
+    "output": "/tmp/clangd_mpib_mpib.o"
   }
 ]

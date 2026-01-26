@@ -4,6 +4,10 @@ CompileFlags:
     - -I/home/suweigao/mynccl/ext-net/gnic/nccl
     - -I/home/suweigao/mynccl/ext-net/gnic/rdma_util
     - -I/home/suweigao/mynccl/ext-net/gnic/rdma_util/jring
+
+    # MPIB plugin includes
+    - -I/home/suweigao/mynccl/ext-net/mpib/include
+    - -I/home/suweigao/mynccl/ext-net/mpib/nccl
     
     # Standard system includes
     - -I/home/suweigao/mynccl/src/include
