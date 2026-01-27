@@ -22,7 +22,7 @@ struct mpibQpInfo {
 
 struct mpibConnectionMetadata {
   struct mpibQpInfo qpInfo[MPIB_IB_MAX_QPS];
-  struct mpibDevInfo devs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibDevInfo devs[MPIB_MAX_DEVS];
   char devName[MAX_MERGED_DEV_NAME];
   uint64_t addr;
   int ndevs;
@@ -248,8 +248,6 @@ static ncclResult_t mpibSenderQpsCreate(mpibSendComm *comm,
   uint nqps = comm->base.nqps;
   for (int qpIndex = 0; qpIndex < (int)nqps; qpIndex++) {
     int devIndex = qpIndex % comm->base.vProps.ndevs;
-    mpibInitCommDevBase(comm->base.vProps.devs[devIndex],
-                        &comm->devs[devIndex].base, &comm->base.stats);
     mpibQp *qp = comm->base.qps + qpIndex;
     qp->devIndex = devIndex;
     NCCLCHECK(mpibCreateQp(mpibDevs[comm->base.vProps.devs[devIndex]].portNum,
@@ -272,7 +270,9 @@ static ncclResult_t mpibSenderQpsToRts(mpibSendComm *comm, int dev,
   for (int qpIndex = 0; qpIndex < (int)nqps; qpIndex++) {
     mpibQp *qp = comm->base.qps + qpIndex;
     int devIndex = qp->devIndex;
-    struct mpibDevInfo *devInfo = comm->base.remDevs + devIndex;
+    int remDevIndex = remMeta->qpInfo[qpIndex].devIndex;
+    qp->remDevIdx = remDevIndex; // MPIB-CUSTOM: Set remDevIdx for sender QPs
+    struct mpibDevInfo *devInfo = comm->base.remDevs + remDevIndex;
     if (remMeta->qpInfo[qpIndex].ece_supported && mpibParamIbEceEnable()) {
       int supported = 0;
       NCCLCHECK(
@@ -380,13 +380,11 @@ ib_recv_dev_list:
   comm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps;
 
   // Init PD, Ctx for each IB device
-  comm->ar = 1;
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     int ibDevN = comm->base.vProps.devs[i];
     NCCLCHECKGOTO(
         mpibInitCommDevBase(ibDevN, &comm->devs[i].base, &comm->base.stats),
         ret, fail);
-    comm->ar = comm->ar && mpibDevs[ibDevN].ar;
   }
 
   memset(&meta, 0, sizeof(meta));
@@ -554,6 +552,17 @@ ib_connect:
   NCCLCHECKGOTO(mpibSenderQpsToRts(comm, dev, &remMeta), ret, fail);
 
   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, comm->base.nRemDevs);
+
+  // MPIB-CUSTOM: Compute QPs per device for two-level striping
+  comm->base.nqpsSout = 0;
+  comm->base.nqpsSup = 0;
+  for (int q = 0; q < comm->base.nqps; q++) {
+    if (comm->base.qps[q].devIndex == 0)
+      comm->base.nqpsSout++;
+    else
+      comm->base.nqpsSup++;
+  }
+
   comm->base.ready = 1;
   comm->base.splitDataOnQps = mpibParamIbSplitDataOnQps();
   stage->state = mpibCommStateConnected;
@@ -836,6 +845,16 @@ ib_recv:
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
   rComm->base.nDataQps =
       std::max(rComm->base.vProps.ndevs, rComm->base.nRemDevs);
+
+  // MPIB-CUSTOM: Compute QPs per device for two-level striping
+  rComm->base.nqpsSout = 0;
+  rComm->base.nqpsSup = 0;
+  for (int q = 0; q < rComm->base.nqps; q++) {
+    if (rComm->base.qps[q].devIndex == 0)
+      rComm->base.nqpsSout++;
+    else
+      rComm->base.nqpsSup++;
+  }
 
   stage->state = mpibCommStateSend;
   stage->offset = 0;

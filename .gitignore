@@ -5,6 +5,8 @@
 
 # VScode
 .cache/
+.github/*
+
 
 # Compiled object files
 *.o
@@ -14,5 +16,8 @@
 *.so
 *.so.*
 
-# test program...
-test_program
+*.txt
+
+
+
+

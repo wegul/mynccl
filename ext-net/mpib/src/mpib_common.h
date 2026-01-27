@@ -34,9 +34,8 @@ struct mpibMrCache {
 };
 
 extern int mpibNMergedIbDevs;
-#define MPIB_IB_MAX_DEVS_PER_NIC 4
-#define MAX_MERGED_DEV_NAME                                                    \
-  (MAXNAMESIZE * MPIB_IB_MAX_DEVS_PER_NIC) + MPIB_IB_MAX_DEVS_PER_NIC
+#define MPIB_MAX_DEVS 2 // MPIB-CUSTOM: Exactly 2 devices (SOUT + SUP)
+#define MAX_MERGED_DEV_NAME (MAXNAMESIZE * MPIB_MAX_DEVS) + MPIB_MAX_DEVS
 struct alignas(64) mpibMergedDev {
   ncclNetVDeviceProps_t vProps;
   int speed;
@@ -126,8 +125,8 @@ struct mpibRequest {
   struct mpibNetCommBase *base;
   int type;
   struct mpibSocket *sock;
-  int events[MPIB_IB_MAX_DEVS_PER_NIC];
-  struct mpibNetCommDevBase *devBases[MPIB_IB_MAX_DEVS_PER_NIC];
+  int events[MPIB_MAX_DEVS];
+  struct mpibNetCommDevBase *devBases[MPIB_MAX_DEVS];
 #ifdef NCCL_ENABLE_NET_PROFILING
   struct mpibProfilerInfo pInfo[MPIB_NET_IB_MAX_RECVS];
 #endif
@@ -136,7 +135,7 @@ struct mpibRequest {
     struct {
       int size;
       void *data;
-      uint32_t lkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+      uint32_t lkeys[MPIB_MAX_DEVS];
       int offset;
     } send;
     struct {
@@ -156,14 +155,13 @@ struct mpibNetCommDevBase {
   struct mpibGidInfo gidInfo;
 };
 
-struct mpibSendFifo {
+struct alignas(32) mpibSendFifo {
   uint64_t addr;
   uint64_t size;
-  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+  uint32_t rkeys[MPIB_MAX_DEVS];
   uint32_t nreqs;
   uint32_t tag;
   uint64_t idx;
-  char padding[16];
 };
 
 struct mpibQp {
@@ -180,7 +178,7 @@ static_assert(NET_IB_MAX_REQUESTS <= 256,
 struct mpibRemCompletionsRecords {
   int elems[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   uint64_t addr;
-  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+  uint32_t rkeys[MPIB_MAX_DEVS];
 };
 
 struct alignas(8) mpibSendCommDev {
@@ -193,21 +191,23 @@ struct alignas(8) mpibSendCommDev {
 
 // Wrapper to track an MR per-device
 struct mpibMrHandle {
-  ibv_mr *mrs[MPIB_IB_MAX_DEVS_PER_NIC];
+  ibv_mr *mrs[MPIB_MAX_DEVS];
 };
 
-struct mpibNetCommBase {
+struct alignas(32) mpibNetCommBase {
   int dev;
   struct mpibQp qps[MPIB_IB_MAX_QPS];
   uint64_t fifoHead;
   int nqps;
+  int nqpsSout; // MPIB-CUSTOM: QP count on SOUT (dev0) for two-level striping
+  int nqpsSup;  // MPIB-CUSTOM: QP count on SUP (dev1) for two-level striping
   int splitDataOnQps;
   struct mpibSocket sock;
   int ready;
   int isSend;
   int nRemDevs;
   int nDataQps;
-  struct mpibDevInfo remDevs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibDevInfo remDevs[MPIB_MAX_DEVS];
   struct mpibStats stats;
   ncclNetVDeviceProps_t vProps;
   struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
@@ -217,11 +217,10 @@ struct mpibSendComm {
   struct mpibNetCommBase base;
   struct mpibSendFifo ctsFifo[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   struct ibv_sge sges[MPIB_NET_IB_MAX_RECVS];
-  struct ibv_send_wr wrs[MPIB_NET_IB_MAX_RECVS + 1];
-  struct mpibSendCommDev devs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct ibv_send_wr wrs[MPIB_NET_IB_MAX_RECVS];
+  struct mpibSendCommDev devs[MPIB_MAX_DEVS];
   struct mpibRequest *fifoReqs[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   struct mpibRemCompletionsRecords remCmplsRecords;
-  int ar;
   uint64_t putSignalScratchpad;
 };
 
@@ -240,7 +239,7 @@ static_assert((offsetof(struct mpibSendComm, wrs) % 32) == 0,
 struct mpibRemCtsFifo {
   struct mpibSendFifo elems[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   uint64_t addr;
-  uint32_t rkeys[MPIB_IB_MAX_DEVS_PER_NIC];
+  uint32_t rkeys[MPIB_MAX_DEVS];
   uint32_t flags;
 };
 
@@ -253,7 +252,7 @@ struct alignas(16) mpibRecvCommDev {
 
 struct mpibRecvComm {
   struct mpibNetCommBase base;
-  struct mpibRecvCommDev devs[MPIB_IB_MAX_DEVS_PER_NIC];
+  struct mpibRecvCommDev devs[MPIB_MAX_DEVS];
   struct mpibRemCtsFifo remCtsFifo;
   int cmplsRecords[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
 };

@@ -1,8 +1,6 @@
 #include "mpib_p2p.h"
 #include "mpib_common.h"
-#include <algorithm>
-
-MPIB_PARAM(IbArThreshold, "IB_AR_THRESHOLD", 8192);
+#include "mpib_compat.h"
 
 const char *mpibReqTypeStr[] = {"Unused", "Send", "Recv", "Flush", "IPut"};
 
@@ -35,96 +33,6 @@ void mpibAddEvent(struct mpibRequest *req, int devIndex) {
   req->devBases[devIndex] = base;
 }
 
-ncclResult_t mpibMultiSend(struct mpibSendComm *comm, int slot) {
-  struct mpibRequest **reqs = comm->fifoReqs[slot];
-  volatile struct mpibSendFifo *slots = comm->ctsFifo[slot];
-  int nreqs = slots[0].nreqs;
-  if (nreqs > MPIB_NET_IB_MAX_RECVS)
-    return ncclInternalError;
-
-  uint64_t wr_id = 0ULL;
-  for (int r = 0; r < nreqs; r++) {
-    struct ibv_send_wr *wr = comm->wrs + r;
-    memset(wr, 0, sizeof(struct ibv_send_wr));
-
-    struct ibv_sge *sge = comm->sges + r;
-    sge->addr = (uintptr_t)reqs[r]->send.data;
-    wr->opcode = IBV_WR_RDMA_WRITE;
-    wr->send_flags = 0;
-    wr->wr.rdma.remote_addr = slots[r].addr;
-    wr->next = wr + 1;
-    wr_id += (reqs[r] - comm->base.reqs) << (r * 8);
-  }
-
-  uint32_t immData = reqs[0]->send.size;
-  if (nreqs > 1) {
-    int *sizes = comm->remCmplsRecords.elems[slot];
-    for (int r = 0; r < nreqs; r++)
-      sizes[r] = reqs[r]->send.size;
-  }
-
-  struct ibv_send_wr *lastWr = comm->wrs + nreqs - 1;
-  if (nreqs > 1 ||
-      (comm->ar && reqs[0]->send.size > mpibParamIbArThreshold())) {
-    lastWr++;
-    memset(lastWr, 0, sizeof(struct ibv_send_wr));
-    if (nreqs > 1) {
-      lastWr->wr.rdma.remote_addr = comm->remCmplsRecords.addr +
-                                    slot * MPIB_NET_IB_MAX_RECVS * sizeof(int);
-      lastWr->num_sge = 1;
-    }
-  }
-  lastWr->wr_id = wr_id;
-  lastWr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  lastWr->imm_data = htobe32(immData);
-  lastWr->next = NULL;
-  lastWr->send_flags = IBV_SEND_SIGNALED;
-
-  const int align = 128;
-  int nqps = mpibCommBaseGetNqpsPerRequest(&comm->base);
-  int qpIndex = -1;
-  mpibQp *qp = NULL;
-  for (int i = 0; i < nqps; i++) {
-    NCCLCHECK(mpibCommBaseGetQpForRequest(&comm->base, comm->base.fifoHead, i,
-                                          &qp, &qpIndex));
-    int devIndex = qp->devIndex;
-    for (int r = 0; r < nreqs; r++) {
-      comm->wrs[r].wr.rdma.rkey = slots[r].rkeys[qp->remDevIdx];
-      int chunkSize = DIVUP(DIVUP(reqs[r]->send.size, nqps), align) * align;
-      int length =
-          std::min(reqs[r]->send.size - reqs[r]->send.offset, chunkSize);
-      if (length <= 0) {
-        comm->wrs[r].sg_list = NULL;
-        comm->wrs[r].num_sge = 0;
-      } else {
-        comm->sges[r].lkey = reqs[r]->send.lkeys[devIndex];
-        comm->sges[r].length = length;
-        comm->wrs[r].sg_list = comm->sges + r;
-        comm->wrs[r].num_sge = 1;
-      }
-    }
-
-    if (nreqs > 1) {
-      lastWr->sg_list = &(comm->devs[devIndex].sge);
-      lastWr->sg_list[0].addr = (uint64_t)(comm->remCmplsRecords.elems[slot]);
-      lastWr->sg_list[0].length = nreqs * sizeof(int);
-      lastWr->wr.rdma.rkey = comm->remCmplsRecords.rkeys[devIndex];
-    }
-
-    struct ibv_send_wr *bad_wr;
-    NCCLCHECK(wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr));
-
-    for (int r = 0; r < nreqs; r++) {
-      int chunkSize = DIVUP(DIVUP(reqs[r]->send.size, nqps), align) * align;
-      reqs[r]->send.offset += chunkSize;
-      comm->sges[r].addr += chunkSize;
-      comm->wrs[r].wr.rdma.remote_addr += chunkSize;
-    }
-  }
-
-  return ncclSuccess;
-}
-
 __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
                                 int tag, void *mhandle, void *phandle,
                                 void **request) {
@@ -138,10 +46,9 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
 
   struct mpibMrHandle *mhandleWrapper = (struct mpibMrHandle *)mhandle;
 
-  int nreqs = 0;
   volatile struct mpibSendFifo *slots;
 
-  int slot = comm->base.fifoHead % NET_IB_MAX_REQUESTS;
+  const int slot = comm->base.fifoHead % NET_IB_MAX_REQUESTS;
   struct mpibRequest **reqs = comm->fifoReqs[slot];
   slots = comm->ctsFifo[slot];
   uint64_t idx = comm->base.fifoHead + 1;
@@ -149,7 +56,11 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
     *request = NULL;
     return ncclSuccess;
   }
-  nreqs = slots[0].nreqs;
+  const int nreqs = slots[0].nreqs;
+  if (nreqs == 0 || nreqs > MPIB_NET_IB_MAX_RECVS) {
+    *request = NULL;
+    return ncclInternalError;
+  }
   for (int r = 1; r < nreqs; r++) {
     if (slots[r].idx != idx) {
       *request = NULL;
@@ -184,6 +95,7 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
     req->send.data = data;
     req->send.offset = 0;
 
+    // Populate events per QP
     int nqps = mpibCommBaseGetNqpsPerRequest(&comm->base);
     int qpIndex = -1;
     mpibQp *qp = NULL;
@@ -203,10 +115,181 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
         return ncclSuccess;
 
     TIME_START(0);
-    NCCLCHECK(mpibMultiSend(comm, slot));
 
-    memset((void *)slots, 0, sizeof(struct mpibSendFifo));
-    memset(reqs, 0, MPIB_NET_IB_MAX_RECVS * sizeof(struct mpibRequest *));
+    // =========================================================================
+    // WR Construction and Posting
+    // MPIB-CUSTOM: Two-level striping (device split + per-device QP stripe)
+    //
+    // This block builds and posts RDMA work requests across multiple QPs.
+    // - Level 1: Device split - data is divided between SOUT (dev0) and SUP
+    // (dev1)
+    // - Level 2: QP stripe - each device's portion is striped across its QPs
+    //
+    // WR chain structure (per QP):
+    //   wrs[0..nreqs-2]: IBV_WR_RDMA_WRITE (data only, not signaled)
+    //   wrs[nreqs-1]:    IBV_WR_RDMA_WRITE_WITH_IMM (data + completion signal)
+    //
+    // For nreqs > 1, the last WR also writes completion sizes to
+    // remCmplsRecords. For nreqs == 1, the single WR carries data directly with
+    // IMM.
+    // =========================================================================
+    {
+      // Build wr_id from packed request indices
+      uint64_t wr_id = 0ULL;
+      for (int i = 0; i < nreqs; i++)
+        wr_id |= (uint64_t)(reqs[i] - comm->base.reqs) << (i * 8);
+
+      // Record sizes for multi-recv
+      uint32_t immData = reqs[0]->send.size;
+      if (nreqs > 1) {
+        int *sizes = comm->remCmplsRecords.elems[slot];
+        for (int i = 0; i < nreqs; i++)
+          sizes[i] = reqs[i]->send.size;
+      }
+
+      // Prepare WRs: last one is RDMA_WRITE_WITH_IMM (signaled), others are
+      // RDMA_WRITE
+      for (int i = 0; i < nreqs; i++) {
+        struct ibv_send_wr *wr = comm->wrs + i;
+        struct ibv_sge *sge = comm->sges + i;
+        memset(wr, 0, sizeof(struct ibv_send_wr));
+        memset(sge, 0, sizeof(struct ibv_sge));
+        if (i == nreqs - 1) {
+          // Last WR: carries IMM and is signaled
+          wr->wr_id = wr_id;
+          wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+          wr->imm_data = htobe32(immData);
+          wr->send_flags = IBV_SEND_SIGNALED;
+          wr->next = NULL;
+        } else {
+          wr->opcode = IBV_WR_RDMA_WRITE;
+          wr->send_flags = 0;
+          wr->next = wr + 1;
+        }
+      }
+
+      // MPIB-CUSTOM: Two-level striping constants
+      const size_t align = 128; // 128B alignment for LL/LL128 protocols
+
+      // Precompute per-request sizes and QP chunk sizes for SOUT (dev0) and SUP
+      // (dev1) Level 1: Device split - how many bytes each device handles Level
+      // 2: QP stripe   - how many bytes each QP on that device handles
+      size_t sizeSout[MPIB_NET_IB_MAX_RECVS];
+      size_t sizeSup[MPIB_NET_IB_MAX_RECVS];
+      size_t qpChunkSout[MPIB_NET_IB_MAX_RECVS];
+      size_t qpChunkSup[MPIB_NET_IB_MAX_RECVS];
+      size_t offsetSout[MPIB_NET_IB_MAX_RECVS];
+      size_t offsetSup[MPIB_NET_IB_MAX_RECVS];
+      memset(offsetSout, 0, sizeof(offsetSout));
+      memset(offsetSup, 0, sizeof(offsetSup));
+
+      const int nqpsSout = comm->base.nqpsSout;
+      const int nqpsSup = comm->base.nqpsSup;
+
+      for (int i = 0; i < nreqs; i++) {
+        const size_t reqSize = reqs[i]->send.size;
+        // MPIB-CUSTOM: Level 1 - Device split (SOUT gets 100%, SUP gets 0%)
+        // TODO: Make split ratio configurable via policy/parameter
+        sizeSout[i] = reqSize;
+        sizeSup[i] = reqSize - sizeSout[i];
+        // Level 2: QP chunk size per device (128B aligned)
+        qpChunkSout[i] =
+            (nqpsSout > 0 && sizeSout[i] > 0)
+                ? DIVUP(DIVUP(sizeSout[i], nqpsSout), align) * align
+                : 0;
+        qpChunkSup[i] = (nqpsSup > 0 && sizeSup[i] > 0)
+                            ? DIVUP(DIVUP(sizeSup[i], nqpsSup), align) * align
+                            : 0;
+      }
+
+      // Post WRs on each QP
+      for (int i = 0; i < nqps; i++) {
+        mpibQp *qpPtr;
+        int qpIdx;
+        NCCLCHECK(mpibCommBaseGetQpForRequest(&comm->base, comm->base.fifoHead,
+                                              i, &qpPtr, &qpIdx));
+        const int devIndex = qpPtr->devIndex; // 0 = SOUT, 1 = SUP
+
+        // Fill in per-request WR fields for this QP's stripe
+        for (int j = 0; j < nreqs; j++) {
+          const uint64_t baseLocalAddr = (uintptr_t)reqs[j]->send.data;
+          const uint64_t baseRemoteAddr = slots[j].addr;
+
+          // Select device-specific values
+          const size_t devSize = (devIndex == 0) ? sizeSout[j] : sizeSup[j];
+          const size_t devBaseOffset = (devIndex == 0) ? 0 : sizeSout[j];
+          const size_t chunkSize =
+              (devIndex == 0) ? qpChunkSout[j] : qpChunkSup[j];
+          size_t &devOffset = (devIndex == 0) ? offsetSout[j] : offsetSup[j];
+
+          // Compute this QP's byte range within device's portion
+          const size_t length = (devOffset < devSize)
+                                    ? std::min(devSize - devOffset, chunkSize)
+                                    : 0;
+          const uint64_t localAddr = baseLocalAddr + devBaseOffset + devOffset;
+          const uint64_t remoteAddr =
+              baseRemoteAddr + devBaseOffset + devOffset;
+
+          struct ibv_send_wr *wr = comm->wrs + j;
+          struct ibv_sge *sge = comm->sges + j;
+
+          if (j == nreqs - 1) {
+            // Last WR: for nreqs > 1, write completion sizes to remCmplsRecords
+            if (nreqs > 1) {
+              wr->wr.rdma.remote_addr = comm->remCmplsRecords.addr +
+                                        (uint64_t)slot *
+                                            (uint64_t)MPIB_NET_IB_MAX_RECVS *
+                                            (uint64_t)sizeof(int);
+              wr->wr.rdma.rkey = comm->remCmplsRecords.rkeys[qpPtr->remDevIdx];
+              wr->sg_list = &(comm->devs[devIndex].sge);
+              wr->sg_list[0].addr =
+                  (uint64_t)(comm->remCmplsRecords.elems[slot]);
+              wr->sg_list[0].length = nreqs * sizeof(int);
+              wr->num_sge = 1;
+            } else {
+              // nreqs == 1: write data directly
+              wr->wr.rdma.remote_addr = remoteAddr;
+              wr->wr.rdma.rkey = slots[j].rkeys[qpPtr->remDevIdx];
+              if (length == 0) {
+                wr->sg_list = NULL;
+                wr->num_sge = 0;
+              } else {
+                sge->addr = localAddr;
+                sge->length = length;
+                sge->lkey = reqs[j]->send.lkeys[devIndex];
+                wr->sg_list = sge;
+                wr->num_sge = 1;
+              }
+            }
+          } else {
+            // Non-last WR: data only
+            wr->wr.rdma.remote_addr = remoteAddr;
+            wr->wr.rdma.rkey = slots[j].rkeys[qpPtr->remDevIdx];
+            if (length == 0) {
+              wr->sg_list = NULL;
+              wr->num_sge = 0;
+            } else {
+              sge->addr = localAddr;
+              sge->length = length;
+              sge->lkey = reqs[j]->send.lkeys[devIndex];
+              wr->sg_list = sge;
+              wr->num_sge = 1;
+            }
+          }
+
+          // Advance offset for next QP on this device
+          devOffset += chunkSize;
+        }
+
+        struct ibv_send_wr *bad_wr;
+        NCCLCHECK(wrap_ibv_post_send(qpPtr->qp, comm->wrs, &bad_wr));
+      }
+    }
+    // =========================================================================
+
+    memset((void *)slots, 0, MPIB_NET_IB_MAX_RECVS * sizeof(*slots));
+    memset((void *)reqs, 0,
+           MPIB_NET_IB_MAX_RECVS * sizeof(struct mpibRequest *));
     comm->base.fifoHead++;
     TIME_STOP(0);
     return ncclSuccess;
@@ -229,7 +312,6 @@ static ncclResult_t mpibPostFifo(struct mpibRecvComm *comm, int n, void **data,
   struct mpibSendFifo *localElem = comm->remCtsFifo.elems[slot];
 
   mpibQp *ctsQp = NULL;
-  ;
   NCCLCHECK(mpibRecvCommGetQpForCts(comm, comm->base.fifoHead, &ctsQp));
 
   for (int i = 0; i < n; i++) {
@@ -256,12 +338,14 @@ static ncclResult_t mpibPostFifo(struct mpibRecvComm *comm, int n, void **data,
   wr.opcode = IBV_WR_RDMA_WRITE;
   wr.send_flags = comm->remCtsFifo.flags;
 
+  // Following net_ib's pattern: signal when slot == ctsQp->devIndex.
+  // This ensures each CTS posting QP gets drained evenly.
+  // With 2 devices: dev0 signals on slot 0, dev1 signals on slot 1, etc.
   if (slot == ctsQp->devIndex) {
     wr.send_flags |= IBV_SEND_SIGNALED;
     wr.wr_id = req - comm->base.reqs;
     mpibAddEvent(req, ctsQp->devIndex);
   }
-
   struct ibv_send_wr *bad_wr;
   NCCLCHECK(wrap_ibv_post_send(ctsQp->qp, &wr, &bad_wr));
   comm->base.fifoHead++;
@@ -295,19 +379,16 @@ __hidden ncclResult_t mpibIrecv(void *recvComm, int n, void **data,
   wr.num_sge = 0;
 
   TIME_START(1);
-
   const int nqps = mpibCommBaseGetNqpsPerRequest(&comm->base);
-
-  struct ibv_recv_wr *bad_wr;
   int qpIndex = -1;
   mpibQp *qp = NULL;
+  struct ibv_recv_wr *bad_wr;
   for (int i = 0; i < nqps; i++) {
     NCCLCHECK(mpibCommBaseGetQpForRequest(&comm->base, comm->base.fifoHead, i,
                                           &qp, &qpIndex));
     mpibAddEvent(req, qp->devIndex);
     NCCLCHECK(wrap_ibv_post_recv(qp->qp, &wr, &bad_wr));
   }
-
   TIME_STOP(1);
 
   TIME_START(2);
@@ -331,8 +412,7 @@ __hidden ncclResult_t mpibIflush(void *recvComm, int n, void **data, int *sizes,
 }
 
 static inline bool mpibRequestIsComplete(struct mpibRequest *request) {
-  return (request->events[0] == 0 && request->events[1] == 0 &&
-          request->events[2] == 0 && request->events[3] == 0);
+  return (request->events[0] == 0 && request->events[1] == 0);
 }
 
 static inline ncclResult_t mpibRequestComplete(struct mpibRequest *r, int *done,
@@ -407,7 +487,7 @@ __hidden ncclResult_t mpibTest(void *request, int *done, int *sizes) {
       return mpibRequestComplete(r, done, sizes);
 
     totalWrDone = 0;
-    for (int i = 0; i < MPIB_IB_MAX_DEVS_PER_NIC; i++) {
+    for (int i = 0; i < MPIB_MAX_DEVS; i++) {
       if (r->devBases[i] == NULL)
         continue;
       if (r->events[i] == 0)
