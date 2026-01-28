@@ -11,7 +11,8 @@ MPIB_PARAM(IbSl, "IB_SL", -1);
 MPIB_PARAM(IbTc, "IB_TC", -1);
 MPIB_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 MPIB_PARAM(IbEceEnable, "IB_ECE_ENABLE", 1);
-MPIB_PARAM(IbSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
+MPIB_PARAM(SoutQp, "SOUT_QP", 2);
+MPIB_PARAM(SupQp, "SUP_QP", 4);
 
 struct mpibQpInfo {
   uint32_t qpn;
@@ -26,6 +27,8 @@ struct mpibConnectionMetadata {
   char devName[MAX_MERGED_DEV_NAME];
   uint64_t addr;
   int ndevs;
+  uint32_t nqpsSout;
+  uint32_t nqpsSup;
   int tc;
   int sl;
 };
@@ -83,8 +86,6 @@ struct mpibHandle {
   struct mpibCommStage stage;
 };
 
-MPIB_PARAM(IbQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
-
 ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
                                  void *cq_context) {
   base->ibDevN = ibDevN;
@@ -97,9 +98,10 @@ ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
     base->pd = ibDev->pd;
   }
 
-  NCCLCHECK(wrap_ibv_create_cq(
-      &base->cq, ibDev->context,
-      2 * NET_IB_MAX_REQUESTS * mpibParamIbQpsPerConn(), cq_context, NULL, 0));
+  NCCLCHECK(wrap_ibv_create_cq(&base->cq, ibDev->context,
+                               2 * NET_IB_MAX_REQUESTS *
+                                   (mpibParamSoutQp() + mpibParamSupQp()),
+                               cq_context, NULL, 0));
 
   return ncclSuccess;
 }
@@ -245,9 +247,11 @@ fail:
 
 static ncclResult_t mpibSenderQpsCreate(mpibSendComm *comm,
                                         struct mpibConnectionMetadata *meta) {
-  uint nqps = comm->base.nqps;
-  for (int qpIndex = 0; qpIndex < (int)nqps; qpIndex++) {
-    int devIndex = qpIndex % comm->base.vProps.ndevs;
+  const uint32_t nqps = comm->base.nqps;
+  const uint32_t nqpsSout = comm->base.nqpsSout;
+  for (uint32_t qpIndex = 0; qpIndex < nqps; qpIndex++) {
+    // Contiguous layout: [SOUT_0..SOUT_{n-1}, SUP_0..SUP_{m-1}]
+    int devIndex = (qpIndex < nqpsSout) ? 0 : 1;
     mpibQp *qp = comm->base.qps + qpIndex;
     qp->devIndex = devIndex;
     NCCLCHECK(mpibCreateQp(mpibDevs[comm->base.vProps.devs[devIndex]].portNum,
@@ -266,8 +270,8 @@ static ncclResult_t mpibSenderQpsCreate(mpibSendComm *comm,
 
 static ncclResult_t mpibSenderQpsToRts(mpibSendComm *comm, int dev,
                                        struct mpibConnectionMetadata *remMeta) {
-  uint nqps = comm->base.nqps;
-  for (int qpIndex = 0; qpIndex < (int)nqps; qpIndex++) {
+  const uint32_t nqps = comm->base.nqps;
+  for (uint32_t qpIndex = 0; qpIndex < nqps; qpIndex++) {
     mpibQp *qp = comm->base.qps + qpIndex;
     int devIndex = qp->devIndex;
     int remDevIndex = remMeta->qpInfo[qpIndex].devIndex;
@@ -374,10 +378,11 @@ ib_recv_dev_list:
   memcpy(&remoteVProps, stage->buffer, sizeof(ncclNetVDeviceProps_t));
   mergedDev = mpibMergedDevs + dev;
   comm->base.vProps = mergedDev->vProps;
-  int localNqps, remoteNqps;
-  localNqps = mpibParamIbQpsPerConn() * comm->base.vProps.ndevs;
-  remoteNqps = mpibParamIbQpsPerConn() * remoteVProps.ndevs;
-  comm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps;
+
+  // Set nqpsSout/nqpsSup from params directly (contiguous layout)
+  comm->base.nqpsSout = (uint32_t)mpibParamSoutQp();
+  comm->base.nqpsSup = (uint32_t)mpibParamSupQp();
+  comm->base.nqps = comm->base.nqpsSout + comm->base.nqpsSup;
 
   // Init PD, Ctx for each IB device
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
@@ -446,6 +451,8 @@ ib_recv_dev_list:
   }
   config = (ncclNetCommConfig_t *)ctx;
   meta.addr = (uint64_t)comm->ctsFifo;
+  meta.nqpsSout = comm->base.nqpsSout;
+  meta.nqpsSup = comm->base.nqpsSup;
   meta.sl = (mpibParamIbSl() != -1) ? mpibParamIbSl()
             : (config && config->trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF)
                 ? config->trafficClass
@@ -496,6 +503,17 @@ ib_connect:
   }
 
   memcpy(&remMeta, stage->buffer, sizeof(mpibConnectionMetadata));
+
+  // Validate peer QP counts match
+  if (remMeta.nqpsSout != comm->base.nqpsSout ||
+      remMeta.nqpsSup != comm->base.nqpsSup) {
+        WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
+          "remote nqpsSout=%u nqpsSup=%u",
+         comm->base.nqpsSout, comm->base.nqpsSup, remMeta.nqpsSout,
+         remMeta.nqpsSup);
+    ret = ncclInvalidUsage;
+    goto fail;
+  }
 
   comm->base.nRemDevs = remMeta.ndevs;
 
@@ -551,20 +569,7 @@ ib_connect:
 
   NCCLCHECKGOTO(mpibSenderQpsToRts(comm, dev, &remMeta), ret, fail);
 
-  comm->base.nDataQps = std::max(comm->base.vProps.ndevs, comm->base.nRemDevs);
-
-  // MPIB-CUSTOM: Compute QPs per device for two-level striping
-  comm->base.nqpsSout = 0;
-  comm->base.nqpsSup = 0;
-  for (int q = 0; q < comm->base.nqps; q++) {
-    if (comm->base.qps[q].devIndex == 0)
-      comm->base.nqpsSout++;
-    else
-      comm->base.nqpsSup++;
-  }
-
   comm->base.ready = 1;
-  comm->base.splitDataOnQps = mpibParamIbSplitDataOnQps();
   stage->state = mpibCommStateConnected;
 
   stage->offset = 0;
@@ -612,9 +617,11 @@ static ncclResult_t
 mpibReceiverQpsCreateToRts(mpibRecvComm *rComm,
                            struct mpibConnectionMetadata *remMeta,
                            struct mpibConnectionMetadata *meta) {
-  uint nqps = rComm->base.nqps;
-  for (int qpIndex = 0; qpIndex < (int)nqps; qpIndex++) {
-    uint devIndex = qpIndex % rComm->base.vProps.ndevs;
+  const uint32_t nqps = rComm->base.nqps;
+  const uint32_t nqpsSout = rComm->base.nqpsSout;
+  for (uint32_t qpIndex = 0; qpIndex < nqps; qpIndex++) {
+    // Contiguous layout: [SOUT_0..SOUT_{n-1}, SUP_0..SUP_{m-1}]
+    int devIndex = (qpIndex < nqpsSout) ? 0 : 1;
     mpibRecvCommDev *rCommDev = &rComm->devs[devIndex];
     mpibDev *ibDev = &mpibDevs[rCommDev->base.ibDevN];
     mpibQpInfo *remQpInfo = &remMeta->qpInfo[qpIndex];
@@ -671,8 +678,6 @@ __hidden ncclResult_t mpibAccept(void *listenComm, void **recvComm,
   int ready;
   int link_layer = IBV_LINK_LAYER_UNSPECIFIED;
   struct mpibMergedDev *mergedDev = NULL;
-  int localNqps = 0;
-  int remoteNqps = 0;
   *recvComm = NULL;
 
   if (stage->state == mpibCommStateAccept)
@@ -727,9 +732,11 @@ ib_recv_dev_list:
   rComm->base.vProps = mergedDev->vProps;
   memcpy(stage->buffer, &rComm->base.vProps, sizeof(ncclNetVDeviceProps_t));
   rComm->base.isSend = false;
-  localNqps = mpibParamIbQpsPerConn() * rComm->base.vProps.ndevs;
-  remoteNqps = mpibParamIbQpsPerConn() * remoteVProps.ndevs;
-  rComm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps;
+
+  // Set nqpsSout/nqpsSup from params directly (contiguous layout)
+  rComm->base.nqpsSout = (uint32_t)mpibParamSoutQp();
+  rComm->base.nqpsSup = (uint32_t)mpibParamSupQp();
+  rComm->base.nqps = rComm->base.nqpsSout + rComm->base.nqpsSup;
 
   stage->offset = 0;
   stage->state = mpibCommStateSendDevList;
@@ -756,6 +763,17 @@ ib_recv:
   }
 
   memcpy(&remMeta, stage->buffer, sizeof(remMeta));
+
+  // Validate peer QP counts match
+  if (remMeta.nqpsSout != rComm->base.nqpsSout ||
+      remMeta.nqpsSup != rComm->base.nqpsSup) {
+        WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
+          "remote nqpsSout=%u nqpsSup=%u",
+         rComm->base.nqpsSout, rComm->base.nqpsSup, remMeta.nqpsSout,
+         remMeta.nqpsSup);
+    ret = ncclInvalidUsage;
+    goto fail;
+  }
 
   struct mpibDev *ibDev;
   int ibDevN;
@@ -838,23 +856,13 @@ ib_recv:
     meta.devs[i].mtu = ibDev->portAttr.active_mtu;
   }
   meta.addr = (uint64_t)rComm->cmplsRecords;
+  meta.nqpsSout = rComm->base.nqpsSout;
+  meta.nqpsSup = rComm->base.nqpsSup;
   meta.sl = remMeta.sl;
   meta.tc = remMeta.tc;
 
   meta.ndevs = rComm->base.vProps.ndevs;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
-  rComm->base.nDataQps =
-      std::max(rComm->base.vProps.ndevs, rComm->base.nRemDevs);
-
-  // MPIB-CUSTOM: Compute QPs per device for two-level striping
-  rComm->base.nqpsSout = 0;
-  rComm->base.nqpsSup = 0;
-  for (int q = 0; q < rComm->base.nqps; q++) {
-    if (rComm->base.qps[q].devIndex == 0)
-      rComm->base.nqpsSout++;
-    else
-      rComm->base.nqpsSup++;
-  }
 
   stage->state = mpibCommStateSend;
   stage->offset = 0;
@@ -887,8 +895,6 @@ ib_recv_ready:
   if (stage->offset != (int)sizeof(int)) {
     return ncclSuccess;
   }
-
-  rComm->base.splitDataOnQps = mpibParamIbSplitDataOnQps();
 
   *recvComm = rComm;
   {

@@ -4,13 +4,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MPIB_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 MPIB_SO=${MPIB_SO:-"${MPIB_DIR}/libnccl-net-mpib.so"}
-HOSTFILE=${HOSTFILE:-"${SCRIPT_DIR}/hostfile"}
 NCCL_TESTS_BIN=${NCCL_TESTS_BIN:-/home/suweigao/benchmark_utils/nccl-tests/build/all_reduce_perf}
-[[ -f "${HOSTFILE}" ]] || { echo "ERROR: hostfile not found: ${HOSTFILE}" >&2; exit 2; }
 [[ -x "${NCCL_TESTS_BIN}" ]] || { echo "ERROR: NCCL_TESTS_BIN not found/executable: ${NCCL_TESTS_BIN}" >&2; exit 2; }
 
-NP=${NP:-4}
-N_PER_NODE=${N_PER_NODE:-1}
+NP=2
+N_PER_NODE=1
 
 # NCCL build lib dir in this repo; must exist at the same path on all nodes.
 NCCL_LIB_DIR=${NCCL_LIB_DIR:-/home/suweigao/mynccl/build/lib}
@@ -33,7 +31,7 @@ NCCL_NET_PLUGIN=mpib
 LD_LIBRARY_PATH_LAUNCH="${MPIB_DIR}:${NCCL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
 MPIRUN=(
-  mpirun --hostfile "${HOSTFILE}" -np "${NP}" -N "${N_PER_NODE}"
+  mpirun -H "accord1,accord3,accord2,accord4" -np "${NP}" -N "${N_PER_NODE}"
   -x "LD_LIBRARY_PATH=${LD_LIBRARY_PATH_LAUNCH}"
   -x "NCCL_DEBUG=${NCCL_DEBUG}"
   -x "NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
@@ -42,8 +40,8 @@ MPIRUN=(
   -x "MPIB_OOB_IF=${MPIB_OOB_IF}"
   -x "MPIB_IB_GID_INDEX=${MPIB_IB_GID_INDEX}"
   -x "NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
-  -x "NCCL_IB_HCA=${MPIB_HCA_SOUT}"
+  -x "NCCL_IB_HCA=${MPIB_HCA_SUP}"
   -x "UCX_NET_DEVICES=${UCX_NET_DEVICES}"
 )
 
-exec "${MPIRUN[@]}" "${NCCL_TESTS_BIN}" -b 4096 -e 1G -f 2 -g 1 -c 1
+exec "${MPIRUN[@]}" "${NCCL_TESTS_BIN}" -b 8 -e 1G -f 2 -g 1 -c 1

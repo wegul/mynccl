@@ -130,10 +130,10 @@ struct mpibRequest {
 #ifdef NCCL_ENABLE_NET_PROFILING
   struct mpibProfilerInfo pInfo[MPIB_NET_IB_MAX_RECVS];
 #endif
-  int nreqs;
+  uint32_t nreqs;
   union {
     struct {
-      int size;
+      size_t size;
       void *data;
       uint32_t lkeys[MPIB_MAX_DEVS];
       int offset;
@@ -198,15 +198,13 @@ struct alignas(32) mpibNetCommBase {
   int dev;
   struct mpibQp qps[MPIB_IB_MAX_QPS];
   uint64_t fifoHead;
-  int nqps;
-  int nqpsSout; // MPIB-CUSTOM: QP count on SOUT (dev0) for two-level striping
-  int nqpsSup;  // MPIB-CUSTOM: QP count on SUP (dev1) for two-level striping
-  int splitDataOnQps;
+  uint32_t nqps;
+  uint32_t nqpsSout; // QP count on SOUT (dev0)
+  uint32_t nqpsSup;  // QP count on SUP (dev1)
   struct mpibSocket sock;
   int ready;
   int isSend;
   int nRemDevs;
-  int nDataQps;
   struct mpibDevInfo remDevs[MPIB_MAX_DEVS];
   struct mpibStats stats;
   ncclNetVDeviceProps_t vProps;
@@ -217,7 +215,8 @@ struct mpibSendComm {
   struct mpibNetCommBase base;
   struct mpibSendFifo ctsFifo[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   struct ibv_sge sges[MPIB_NET_IB_MAX_RECVS];
-  struct ibv_send_wr wrs[MPIB_NET_IB_MAX_RECVS];
+  struct ibv_send_wr
+      wrs[MPIB_NET_IB_MAX_RECVS + 1]; // +1 for extra WR when nreqs > 1
   struct mpibSendCommDev devs[MPIB_MAX_DEVS];
   struct mpibRequest *fifoReqs[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   struct mpibRemCompletionsRecords remCmplsRecords;
@@ -298,19 +297,20 @@ struct mpibNetCommDevBase *mpibGetNetCommDevBase(struct mpibNetCommBase *base,
                                                  int devIndex);
 
 static inline ncclResult_t
-mpibCommBaseGetQpByIndex(struct mpibNetCommBase *commBase, int devIndex,
-                         int qpIndex, struct mpibQp **qp) {
-  assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
-  assert(qpIndex >= 0 && qpIndex < commBase->nDataQps);
-  *qp = &(commBase->qps[commBase->nDataQps * qpIndex + devIndex]);
-  return ncclSuccess;
-}
-
-static inline ncclResult_t
 mpibCommBaseGetQpForRequest(struct mpibNetCommBase *baseComm, const uint32_t id,
-                            const uint8_t qpIndex, struct mpibQp **outQp,
-                            int *outQpIndex) {
-  *outQpIndex = (id + qpIndex) % baseComm->nqps;
+                            const uint8_t devIndex, struct mpibQp **outQp,
+                            uint32_t *outQpIndex) {
+  // devIndex: 0=SOUT, 1=SUP
+  // id: fifoHead counter for round-robin within device
+  // Select one QP from the device's pool using round-robin
+  if (devIndex == 0) {
+    // SOUT: pick from qps[0..nqpsSout-1]
+    *outQpIndex = (baseComm->nqpsSout > 0) ? (id % baseComm->nqpsSout) : 0;
+  } else {
+    // SUP: pick from qps[nqpsSout..nqps-1]
+    *outQpIndex = baseComm->nqpsSout +
+                  ((baseComm->nqpsSup > 0) ? (id % baseComm->nqpsSup) : 0);
+  }
   *outQp = &(baseComm->qps[*outQpIndex]);
   assert(*outQp != NULL);
   return ncclSuccess;
@@ -318,7 +318,8 @@ mpibCommBaseGetQpForRequest(struct mpibNetCommBase *baseComm, const uint32_t id,
 
 static inline int
 mpibCommBaseGetNqpsPerRequest(struct mpibNetCommBase *baseComm) {
-  return (baseComm->splitDataOnQps == 1) ? baseComm->nqps : baseComm->nDataQps;
+  // Each request uses one QP per device (ndevs QPs total)
+  return baseComm->vProps.ndevs;
 }
 
 ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
