@@ -295,10 +295,9 @@ static ncclResult_t mpibPostFifo(struct mpibRecvComm *comm, int n, void **data,
   wr.opcode = IBV_WR_RDMA_WRITE;
   wr.send_flags = comm->remCtsFifo.flags;
 
-  // Signal when slot == devIndex (net_ib pattern).
-  // CTS uses one fixed QP per device, so this ensures each CTS QP gets
-  // a signaled completion every ndevs slots, draining the send queue.
-  if (slot == (uint32_t)ctsQp->devIndex) {
+  // Signal every MPIB_CTS_SIGNAL_INTERVAL slots to drain the single CTS QP.
+  // CTS is pinned to SOUT (device 0), so all 256 slots go through one QP.
+  if ((slot % MPIB_CTS_SIGNAL_INTERVAL) == 0) {
     wr.send_flags |= IBV_SEND_SIGNALED;
     wr.wr_id = req - comm->base.reqs;
     mpibAddEvent(req, ctsQp->devIndex);

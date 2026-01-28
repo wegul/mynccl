@@ -35,6 +35,7 @@ struct mpibMrCache {
 
 extern int mpibNMergedIbDevs;
 #define MPIB_MAX_DEVS 2 // MPIB-CUSTOM: Exactly 2 devices (SOUT + SUP)
+#define MPIB_CTS_SIGNAL_INTERVAL 128 // Signal CTS every N slots
 #define MAX_MERGED_DEV_NAME (MAXNAMESIZE * MPIB_MAX_DEVS) + MPIB_MAX_DEVS
 struct alignas(64) mpibMergedDev {
   ncclNetVDeviceProps_t vProps;
