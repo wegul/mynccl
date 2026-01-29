@@ -222,6 +222,9 @@ struct mpibSendComm {
   struct mpibRequest *fifoReqs[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
   struct mpibRemCompletionsRecords remCmplsRecords;
   uint64_t putSignalScratchpad;
+  /* Agent integration fields */
+  uint32_t conn_id;   /* Connection ID for agent registration */
+  uint32_t hint_slot; /* Index into agent hint SHM */
 };
 
 static_assert((sizeof(struct mpibNetCommBase) % 32) == 0,
@@ -255,6 +258,9 @@ struct mpibRecvComm {
   struct mpibRecvCommDev devs[MPIB_MAX_DEVS];
   struct mpibRemCtsFifo remCtsFifo;
   int cmplsRecords[NET_IB_MAX_REQUESTS][MPIB_NET_IB_MAX_RECVS];
+  /* Agent integration fields */
+  uint32_t conn_id;   /* Connection ID for agent registration */
+  uint32_t hint_slot; /* Index into agent hint SHM */
 };
 
 static_assert((offsetof(struct mpibRecvComm, remCtsFifo) % 32) == 0,

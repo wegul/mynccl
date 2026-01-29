@@ -10,6 +10,21 @@ NCCL_TESTS_BIN=${NCCL_TESTS_BIN:-/home/suweigao/benchmark_utils/nccl-tests/build
 NP=2
 N_PER_NODE=1
 
+MODE=${1:-}
+if [[ "${MODE}" == "--help" || "${MODE}" == "-h" ]]; then
+  cat <<'EOF'
+Usage:
+  launch_nccl.sh                 # one-shot run (default)
+  launch_nccl.sh -p              # continuous runs for manual policy testing
+
+Env vars:
+  NP, N_PER_NODE, NCCL_TESTS_BIN (or BINARY), NCCL_LIB_DIR,
+  MPIB_HCA_SOUT, MPIB_HCA_SUP, MPIB_OOB_IF, MPIB_IB_GID_INDEX,
+  NCCL_DEBUG, NCCL_DEBUG_SUBSYS
+EOF
+  exit 0
+fi
+
 # NCCL build lib dir in this repo; must exist at the same path on all nodes.
 NCCL_LIB_DIR=${NCCL_LIB_DIR:-/home/suweigao/mynccl/build/lib}
 
@@ -30,8 +45,8 @@ NCCL_NET_PLUGIN=mpib
 # Build the runtime env we will export to ranks via mpirun.
 LD_LIBRARY_PATH_LAUNCH="${MPIB_DIR}:${NCCL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
-MPIRUN=(
-  mpirun -H "accord1,accord3,accord2,accord4" -np "${NP}" -N "${N_PER_NODE}"
+MPIRUN_BASE=(
+  mpirun
   -x "LD_LIBRARY_PATH=${LD_LIBRARY_PATH_LAUNCH}"
   -x "NCCL_DEBUG=${NCCL_DEBUG}"
   -x "NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
@@ -44,4 +59,23 @@ MPIRUN=(
   -x "UCX_NET_DEVICES=${UCX_NET_DEVICES}"
 )
 
-exec "${MPIRUN[@]}" "${NCCL_TESTS_BIN}" -b 8 -e 1G -f 2 -g 1 -c 1
+if [[ "${MODE}" == "-p" ]]; then
+  SIZE=${SIZE:-$((1024*1024*1024))}
+  WARMUP=${WARMUP:-0}
+  PERSISTENT_NCCL_DEBUG=${PERSISTENT_NCCL_DEBUG:-VERSION}
+  PERSISTENT_NCCL_DEBUG_SUBSYS=${PERSISTENT_NCCL_DEBUG_SUBSYS:-}
+
+  while true; do
+    "${MPIRUN_BASE[@]}" \
+      -x "NCCL_DEBUG=${PERSISTENT_NCCL_DEBUG}" \
+      -x "NCCL_DEBUG_SUBSYS=${PERSISTENT_NCCL_DEBUG_SUBSYS}" \
+      -H "accord1,accord3,accord2,accord4" -np "${NP}" \
+      "${NCCL_TESTS_BIN}" -b "${SIZE}" -e "${SIZE}" -f 1 -w "${WARMUP}" -n 1 \
+      2>/dev/null | awk '/^[[:space:]]*[0-9]+[[:space:]]/ {print; fflush();}' || break
+  done
+  exit 0
+fi
+
+# Default one-shot mode
+exec "${MPIRUN_BASE[@]}" -H "accord1,accord3,accord2,accord4" -np "${NP}" -N "${N_PER_NODE}" \
+  "${NCCL_TESTS_BIN}" -b 8 -e 1G -f 2 -g 1 -c 1

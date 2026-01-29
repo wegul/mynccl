@@ -1,4 +1,5 @@
 #include "mpib_p2p.h"
+#include "mpib_agent_client.h"
 #include "mpib_common.h"
 #include "mpib_compat.h"
 #include <cstdint>
@@ -183,16 +184,26 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       size_t sizeSout[MPIB_NET_IB_MAX_RECVS];
       size_t sizeSup[MPIB_NET_IB_MAX_RECVS];
 
+      // Read hint from agent and compute split ratio
+      // Hint is an unsigned multiplier of SOUT bandwidth:
+      //   sup_bw is a multiplier (sup_bw * sout_bw)
+      // Therefore:
+      //   sup_ratio = sup_bw / (1 + sup_bw)
+      const uint32_t sup_bw = mpibAgentReadHint(comm->hint_slot);
+      const float sup_ratio =
+          (sup_bw == 0) ? 0.0f : ((float)sup_bw / (1.0f + (float)sup_bw));
+
       for (uint32_t i = 0; i < nreqs; i++) {
         const size_t reqSize = reqs[i]->send.size;
-        // Device split: SOUT=0%, SUP=100%
-        // Keep SOUT aligned to 128B.
-        size_t sout = 0;
-        if (sout < reqSize) {
-          sout = (sout / align) * align;
-        }
-        sizeSout[i] = sout;
-        sizeSup[i] = reqSize - sizeSout[i];
+        // Compute SUP portion based on hint-derived ratio, aligned to 128B
+        size_t sup_raw = (size_t)(reqSize * sup_ratio);
+        // Round to 128B boundary
+        size_t sup = (sup_raw / align) * align;
+        if (sup > reqSize)
+          sup = reqSize;
+
+        sizeSup[i] = sup;
+        sizeSout[i] = reqSize - sizeSup[i];
       }
 
       // Post WRs: one QP per device (MPIB device-based split, not QP striping)

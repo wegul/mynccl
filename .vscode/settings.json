@@ -37,5 +37,6 @@
   "C_Cpp.vcFormat.indent.caseContents": false,
   "C_Cpp.vcFormat.indent.lambdaBracesWhenParameter": false,
   "C_Cpp.vcFormat.indent.namespaceContents": false,
-  "editor.detectIndentation": false
+  "editor.detectIndentation": false,
+  "chat.agent.maxRequests": 800
 }

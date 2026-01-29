@@ -1,3 +1,4 @@
+#include "mpib_agent_client.h"
 #include "mpib_common.h"
 #include <cstring>
 #include <ifaddrs.h>
@@ -233,6 +234,9 @@ __hidden ncclResult_t mpibInit(void **ctx, uint64_t commId,
   ncclResult_t ret = ncclSuccess;
   ncclNetCommConfig_t *netCommConfig = nullptr;
   NCCLCHECK(mpibInitDevices(logFunction, profFunction));
+
+  /* Initialize agent client (SHM mapping) */
+  NCCLCHECK(mpibAgentClientInit());
   NCCLCHECK(mpibCalloc(&netCommConfig, 1));
   netCommConfig->trafficClass =
       config ? config->trafficClass : NCCL_NET_TRAFFIC_CLASS_UNDEF;
@@ -285,5 +289,6 @@ __hidden ncclResult_t mpibMakeVDevice(int *d, ncclNetVDeviceProps_t *props) {
 
 __hidden ncclResult_t mpibFinalize(void *ctx) {
   free(ctx);
+  mpibAgentClientDestroy();
   return mpibFinalizeDevices();
 }

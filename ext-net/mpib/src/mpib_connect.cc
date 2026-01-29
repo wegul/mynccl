@@ -1,6 +1,9 @@
+#include "mpib_agent_client.h"
 #include "mpib_common.h"
 #include <algorithm>
 #include <limits.h>
+
+static uint32_t mpibGidToIpv4(const union ibv_gid *gid, int *isV4);
 
 MPIB_PARAM(IbGidIndex, "IB_GID_INDEX", 3);
 MPIB_PARAM(IbTimeout, "IB_TIMEOUT", 20);
@@ -13,6 +16,12 @@ MPIB_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 MPIB_PARAM(IbEceEnable, "IB_ECE_ENABLE", 1);
 MPIB_PARAM(SoutQp, "SOUT_QP", 2);
 MPIB_PARAM(SupQp, "SUP_QP", 4);
+
+/* Agent registration conn_id counter (thread-safe) */
+static std::atomic<uint16_t> g_mpib_conn_counter{0};
+
+/* Include shared interface for MPIB_MAKE_CONN_ID */
+#include "../../transport_agent/include/mpib_agent_iface.h"
 
 struct mpibQpInfo {
   uint32_t qpn;
@@ -507,8 +516,8 @@ ib_connect:
   // Validate peer QP counts match
   if (remMeta.nqpsSout != comm->base.nqpsSout ||
       remMeta.nqpsSup != comm->base.nqpsSup) {
-        WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
-          "remote nqpsSout=%u nqpsSup=%u",
+    WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
+         "remote nqpsSout=%u nqpsSup=%u",
          comm->base.nqpsSout, comm->base.nqpsSup, remMeta.nqpsSout,
          remMeta.nqpsSup);
     ret = ncclInvalidUsage;
@@ -591,6 +600,45 @@ ib_send_ready:
     INFO(NCCL_NET, "NET/MPIB: mpibConnect DONE peer=%s",
          mpibSocketToString(&addr, line));
   }
+
+  /* Register connection with agent */
+  {
+    uint16_t counter =
+        g_mpib_conn_counter.fetch_add(1, std::memory_order_relaxed);
+    comm->conn_id = MPIB_MAKE_CONN_ID(getpid(), counter);
+
+    /* Extract IPv4 from GID (IPv4-mapped IPv6: ::ffff:a.b.c.d) */
+    /* SOUT = dev[0], SUP = dev[1] */
+    int sout_src_is_v4 = 0, sout_dst_is_v4 = 0;
+    int sup_src_is_v4 = 0, sup_dst_is_v4 = 0;
+    uint32_t sout_src_ip =
+        mpibGidToIpv4(&comm->devs[0].base.gidInfo.localGid, &sout_src_is_v4);
+    uint32_t sout_dst_ip =
+        mpibGidToIpv4(&comm->base.remDevs[0].gid, &sout_dst_is_v4);
+    uint32_t sup_src_ip =
+        mpibGidToIpv4(&comm->devs[1].base.gidInfo.localGid, &sup_src_is_v4);
+    uint32_t sup_dst_ip =
+        mpibGidToIpv4(&comm->base.remDevs[1].gid, &sup_dst_is_v4);
+    if (!sout_src_is_v4 || !sout_dst_is_v4 || !sup_src_is_v4 ||
+        !sup_dst_is_v4) {
+      WARN("NET/MPIB : Non-IPv4 GID detected for agent registration: "
+           "sout_src_v4=%d sout_dst_v4=%d sup_src_v4=%d sup_dst_v4=%d",
+           sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
+    }
+
+    ncclResult_t regRet =
+        mpibAgentRegister(comm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,
+                          sup_dst_ip, &comm->hint_slot);
+    if (regRet != ncclSuccess) {
+      WARN("NET/MPIB : Agent registration failed for conn_id=0x%08x",
+           comm->conn_id);
+      ret = regRet;
+      goto fail;
+    }
+    INFO(NCCL_NET, "NET/MPIB : Registered conn_id=0x%08x hint_slot=%u",
+         comm->conn_id, comm->hint_slot);
+  }
+
   *sendComm = comm;
   return ncclSuccess;
 
@@ -605,6 +653,25 @@ fail:
 }
 
 MPIB_PARAM(IbWarnRailLocal, "IB_WARN_RAIL_LOCAL", 0);
+
+static uint32_t mpibGidToIpv4(const union ibv_gid *gid, int *isV4) {
+  const uint8_t *b = gid->raw;
+  int v4 = 1;
+  for (int i = 0; i < 10; i++) {
+    if (b[i] != 0) {
+      v4 = 0;
+      break;
+    }
+  }
+  if (v4 && (b[10] != 0xff || b[11] != 0xff))
+    v4 = 0;
+  if (isV4)
+    *isV4 = v4;
+  if (!v4)
+    return 0;
+  return ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+         ((uint32_t)b[14] << 8) | (uint32_t)b[15];
+}
 
 static ncclResult_t mpibCheckVProps(ncclNetVDeviceProps_t *vProps1,
                                     ncclNetVDeviceProps_t *vProps2) {
@@ -767,8 +834,8 @@ ib_recv:
   // Validate peer QP counts match
   if (remMeta.nqpsSout != rComm->base.nqpsSout ||
       remMeta.nqpsSup != rComm->base.nqpsSup) {
-        WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
-          "remote nqpsSout=%u nqpsSup=%u",
+    WARN("NET/MPIB : QP count mismatch: local nqpsSout=%u nqpsSup=%u, "
+         "remote nqpsSout=%u nqpsSup=%u",
          rComm->base.nqpsSout, rComm->base.nqpsSup, remMeta.nqpsSout,
          remMeta.nqpsSup);
     ret = ncclInvalidUsage;
@@ -896,6 +963,44 @@ ib_recv_ready:
     return ncclSuccess;
   }
 
+  /* Register connection with agent */
+  {
+    uint16_t counter =
+        g_mpib_conn_counter.fetch_add(1, std::memory_order_relaxed);
+    rComm->conn_id = MPIB_MAKE_CONN_ID(getpid(), counter);
+
+    /* Extract IPv4 from GID (IPv4-mapped IPv6: ::ffff:a.b.c.d) */
+    /* SOUT = dev[0], SUP = dev[1] */
+    int sout_src_is_v4 = 0, sout_dst_is_v4 = 0;
+    int sup_src_is_v4 = 0, sup_dst_is_v4 = 0;
+    uint32_t sout_src_ip =
+        mpibGidToIpv4(&rComm->devs[0].base.gidInfo.localGid, &sout_src_is_v4);
+    uint32_t sout_dst_ip =
+        mpibGidToIpv4(&rComm->base.remDevs[0].gid, &sout_dst_is_v4);
+    uint32_t sup_src_ip =
+        mpibGidToIpv4(&rComm->devs[1].base.gidInfo.localGid, &sup_src_is_v4);
+    uint32_t sup_dst_ip =
+        mpibGidToIpv4(&rComm->base.remDevs[1].gid, &sup_dst_is_v4);
+    if (!sout_src_is_v4 || !sout_dst_is_v4 || !sup_src_is_v4 ||
+        !sup_dst_is_v4) {
+      WARN("NET/MPIB : Non-IPv4 GID detected for agent registration: "
+           "sout_src_v4=%d sout_dst_v4=%d sup_src_v4=%d sup_dst_v4=%d",
+           sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
+    }
+
+    ncclResult_t regRet =
+        mpibAgentRegister(rComm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,
+                          sup_dst_ip, &rComm->hint_slot);
+    if (regRet != ncclSuccess) {
+      WARN("NET/MPIB : Agent registration failed for conn_id=0x%08x",
+           rComm->conn_id);
+      ret = regRet;
+      goto fail;
+    }
+    INFO(NCCL_NET, "NET/MPIB : Registered conn_id=0x%08x hint_slot=%u",
+         rComm->conn_id, rComm->hint_slot);
+  }
+
   *recvComm = rComm;
   {
     char line[MPIB_SOCKET_NAME_MAXLEN + 1];
@@ -918,6 +1023,11 @@ fail:
 __hidden ncclResult_t mpibCloseSend(void *sendComm) {
   struct mpibSendComm *comm = (struct mpibSendComm *)sendComm;
   if (comm) {
+    /* Deregister from agent (best-effort) */
+    if (comm->conn_id != 0) {
+      mpibAgentDeregister(comm->conn_id);
+    }
+
     NCCLCHECK(mpibSocketClose(&comm->base.sock));
     for (int q = 0; q < comm->base.nqps; q++)
       if (comm->base.qps[q].qp != NULL)
@@ -942,6 +1052,11 @@ __hidden ncclResult_t mpibCloseSend(void *sendComm) {
 __hidden ncclResult_t mpibCloseRecv(void *recvComm) {
   struct mpibRecvComm *comm = (struct mpibRecvComm *)recvComm;
   if (comm) {
+    /* Deregister from agent (best-effort) */
+    if (comm->conn_id != 0) {
+      mpibAgentDeregister(comm->conn_id);
+    }
+
     NCCLCHECK(mpibSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
