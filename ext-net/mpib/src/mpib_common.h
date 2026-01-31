@@ -36,6 +36,32 @@ struct mpibMrCache {
 extern int mpibNMergedIbDevs;
 #define MPIB_MAX_DEVS 2 // MPIB-CUSTOM: Exactly 2 devices (SOUT + SUP)
 #define MPIB_CTS_SIGNAL_INTERVAL 128 // Signal CTS every N slots
+
+// SRQ watermarks (hardcoded per design doc)
+#define MPIB_SRQ_LOW_WATER 64
+#define MPIB_SRQ_HIGH_WATER 512
+
+// IMM data encoding for SRQ-based completion
+// Layout: [7:0] slot_idx, [9:8] active_mask, [31:10] size_q
+#define MPIB_IMM_SLOT_BITS 8
+#define MPIB_IMM_MASK_BITS 2
+#define MPIB_IMM_SIZEQ_BITS 22
+#define MPIB_IMM_SIZE_GRANULARITY 128
+#define MPIB_IMM_SIZEQ_SENTINEL ((1u << MPIB_IMM_SIZEQ_BITS) - 1)
+
+// IMM data pack/unpack helpers
+static inline uint32_t mpibImmEncode(uint8_t slot, uint8_t mask,
+                                     uint32_t size_q) {
+  return ((uint32_t)slot) | ((uint32_t)(mask & 0x3) << 8) |
+         ((size_q & MPIB_IMM_SIZEQ_SENTINEL) << 10);
+}
+static inline void mpibImmDecode(uint32_t imm, uint8_t *slot, uint8_t *mask,
+                                 uint32_t *size_q) {
+  *slot = (uint8_t)(imm & 0xFF);
+  *mask = (uint8_t)((imm >> 8) & 0x3);
+  *size_q = (imm >> 10) & MPIB_IMM_SIZEQ_SENTINEL;
+}
+
 #define MAX_MERGED_DEV_NAME (MAXNAMESIZE * MPIB_MAX_DEVS) + MPIB_MAX_DEVS
 struct alignas(64) mpibMergedDev {
   ncclNetVDeviceProps_t vProps;
@@ -132,6 +158,11 @@ struct mpibRequest {
   struct mpibProfilerInfo pInfo[MPIB_NET_IB_MAX_RECVS];
 #endif
   uint32_t nreqs;
+  // SRQ-based completion tracking (RECV only)
+  uint8_t slot;          // Slot index (0..255)
+  uint8_t expected_mask; // Active rail mask learned from first IMM (0 = unset)
+  uint8_t seen_mask;     // Rails that have delivered an IMM
+  uint8_t _pad;
   union {
     struct {
       size_t size;
@@ -152,7 +183,9 @@ struct mpibNetCommDevBase {
   int ibDevN;
   struct ibv_pd *pd;
   struct ibv_cq *cq;
-  uint64_t pad[2];
+  // SRQ for recv comms (NULL for send comms)
+  struct ibv_srq *srq;
+  int srqPosted; // Number of generic WQEs posted to SRQ
   struct mpibGidInfo gidInfo;
 };
 
@@ -210,6 +243,8 @@ struct alignas(32) mpibNetCommBase {
   struct mpibStats stats;
   ncclNetVDeviceProps_t vProps;
   struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
+  // SRQ: slot→request map for recv comms (used by completion handler)
+  struct mpibRequest *slotReq[NET_IB_MAX_REQUESTS];
 };
 
 struct mpibSendComm {

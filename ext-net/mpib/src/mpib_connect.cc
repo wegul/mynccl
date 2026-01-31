@@ -98,6 +98,10 @@ struct mpibHandle {
 ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
                                  void *cq_context) {
   base->ibDevN = ibDevN;
+  // Initialize SRQ fields (will be created later for recv comms)
+  base->srq = NULL;
+  base->srqPosted = 0;
+
   mpibDev *ibDev = mpibDevs + ibDevN;
   {
     std::lock_guard<std::mutex> lock(ibDev->mutex);
@@ -116,12 +120,30 @@ ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,
 }
 
 ncclResult_t mpibDestroyBase(struct mpibNetCommDevBase *base) {
+  // Destroy SRQ first (if present)
+  if (base->srq != NULL) {
+    NCCLCHECK(wrap_ibv_destroy_srq(base->srq));
+    base->srq = NULL;
+  }
   NCCLCHECK(wrap_ibv_destroy_cq(base->cq));
   std::lock_guard<std::mutex> lock(mpibDevs[base->ibDevN].mutex);
   if (0 == --mpibDevs[base->ibDevN].pdRefs) {
     NCCLCHECK(wrap_ibv_dealloc_pd(mpibDevs[base->ibDevN].pd));
     mpibDevs[base->ibDevN].pd = NULL;
   }
+  return ncclSuccess;
+}
+
+// Create SRQ for recv comms. Must be called after mpibInitCommDevBase.
+static ncclResult_t mpibCreateSrqForRecvBase(struct mpibNetCommDevBase *base) {
+  struct ibv_srq_init_attr srqAttr;
+  memset(&srqAttr, 0, sizeof(srqAttr));
+  srqAttr.attr.max_wr = MPIB_SRQ_HIGH_WATER;
+  srqAttr.attr.max_sge = 1; // Even though we post num_sge=0
+  NCCLCHECK(wrap_ibv_create_srq(&base->srq, base->pd, &srqAttr));
+  base->srqPosted = 0;
+  INFO(NCCL_NET, "NET/MPIB : Created SRQ %p for dev %d (highWater=%d)",
+       base->srq, base->ibDevN, MPIB_SRQ_HIGH_WATER);
   return ncclSuccess;
 }
 
@@ -149,7 +171,13 @@ ncclResult_t mpibCreateQp(uint8_t ib_port, struct mpibNetCommDevBase *base,
   qpInitAttr.recv_cq = base->cq;
   qpInitAttr.qp_type = IBV_QPT_RC;
   qpInitAttr.cap.max_send_wr = 2 * NET_IB_MAX_REQUESTS;
-  qpInitAttr.cap.max_recv_wr = NET_IB_MAX_REQUESTS;
+  // SRQ: if SRQ is present, use it and set max_recv_wr to 0
+  if (base->srq != NULL) {
+    qpInitAttr.srq = base->srq;
+    qpInitAttr.cap.max_recv_wr = 0;
+  } else {
+    qpInitAttr.cap.max_recv_wr = NET_IB_MAX_REQUESTS;
+  }
   qpInitAttr.cap.max_send_sge = 1;
   qpInitAttr.cap.max_recv_sge = 1;
   qpInitAttr.cap.max_inline_data =
@@ -168,9 +196,9 @@ ncclResult_t mpibCreateQp(uint8_t ib_port, struct mpibNetCommDevBase *base,
 
   TRACE(NCCL_NET,
         "NET/MPIB : mpibCreateQp port=%d dev=%d devName=%s qpn=%u pkey=%u "
-        "pd=%p",
+        "pd=%p srq=%p",
         ib_port, base->ibDevN, mpibDevs[base->ibDevN].devName, qp->qp->qp_num,
-        qpAttr.pkey_index, base->pd);
+        qpAttr.pkey_index, base->pd, base->srq);
   return ncclSuccess;
 }
 
@@ -857,6 +885,8 @@ ib_recv:
     NCCLCHECKGOTO(
         mpibInitCommDevBase(ibDevN, &rCommDev->base, &rComm->base.stats), ret,
         fail);
+    // Create SRQ for this recv comm device (mandatory for recv comms)
+    NCCLCHECKGOTO(mpibCreateSrqForRecvBase(&rCommDev->base), ret, fail);
     ibDev = mpibDevs + ibDevN;
     NCCLCHECKGOTO(mpibGetGidIndex(ibDev->context, ibDev->portNum,
                                   &ibDev->portAttr,
@@ -871,6 +901,9 @@ ib_recv:
     if (link_layer != ibDev->portAttr.link_layer)
       return ncclInternalError;
   }
+
+  // Initialize slotReq map for SRQ-based completion
+  memset(rComm->base.slotReq, 0, sizeof(rComm->base.slotReq));
 
   for (int i = 0; i < remMeta.ndevs; i++) {
     rComm->base.remDevs[i] = remMeta.devs[i];

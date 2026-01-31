@@ -7,15 +7,17 @@
 #include <infiniband/verbs.h>
 #define ASSIGN_SYM(container, symbol, name) container->name = &symbol;
 
-struct ibv_mr* ibv_internal_reg_mr(struct ibv_pd* pd, void* addr, size_t length, int access) {
+struct ibv_mr *ibv_internal_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
+                                   int access) {
   return ibv_reg_mr(pd, addr, length, access);
 }
 
-int ibv_internal_query_port(struct ibv_context* context, uint8_t port_num, struct ibv_port_attr* port_attr) {
+int ibv_internal_query_port(struct ibv_context *context, uint8_t port_num,
+                            struct ibv_port_attr *port_attr) {
   return ibv_query_port(context, port_num, port_attr);
 }
 
-ncclResult_t buildIbvSymbols(struct ncclIbvSymbols* ibvSymbols) {
+ncclResult_t buildIbvSymbols(struct ncclIbvSymbols *ibvSymbols) {
   ASSIGN_SYM(ibvSymbols, ibv_get_device_list, ibv_internal_get_device_list);
   ASSIGN_SYM(ibvSymbols, ibv_free_device_list, ibv_internal_free_device_list);
   ASSIGN_SYM(ibvSymbols, ibv_get_device_name, ibv_internal_get_device_name);
@@ -44,16 +46,19 @@ ncclResult_t buildIbvSymbols(struct ncclIbvSymbols* ibvSymbols) {
   ASSIGN_SYM(ibvSymbols, ibv_query_ece, ibv_internal_query_ece);
   ASSIGN_SYM(ibvSymbols, ibv_set_ece, ibv_internal_set_ece);
 
+  // SRQ support
+  ASSIGN_SYM(ibvSymbols, ibv_create_srq, ibv_internal_create_srq);
+  ASSIGN_SYM(ibvSymbols, ibv_destroy_srq, ibv_internal_destroy_srq);
+
   ibvSymbols->ibv_internal_reg_mr = &ibv_internal_reg_mr;
   ibvSymbols->ibv_internal_query_port = &ibv_internal_query_port;
   return ncclSuccess;
 }
 #else
 #include "ibvcore.h"
+#include "ibvsymbols.h"
 #include "ibvwrap.h"
-#include "ibvsymbols.h"
-#include "ibvsymbols.h"
 #include "mpib_compat.h"
 
-extern ncclResult_t buildIbvSymbols(struct ncclIbvSymbols* ibvSymbols);
+extern ncclResult_t buildIbvSymbols(struct ncclIbvSymbols *ibvSymbols);
 #endif
