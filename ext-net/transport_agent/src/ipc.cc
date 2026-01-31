@@ -9,6 +9,7 @@
 #include "../include/mpib_agent_iface.h"
 #include "shm.h"
 
+#include <arpa/inet.h>
 #include <cstdio>
 #include <cstring>
 #include <errno.h>
@@ -75,6 +76,15 @@ static int send_all(int fd, const void *buf, size_t len) {
   return 0;
 }
 
+static const char *ip_to_str(uint32_t ip, char *buf, size_t len) {
+  struct in_addr addr;
+  addr.s_addr = htonl(ip);
+  if (inet_ntop(AF_INET, &addr, buf, len) == nullptr) {
+    snprintf(buf, len, "0.0.0.0");
+  }
+  return buf;
+}
+
 /* ============================================================================
  * Socket Management
  * ============================================================================
@@ -138,8 +148,11 @@ uint32_t slot_find_or_allocate(uint32_t src_ip, uint32_t dst_ip,
     /* Existing slot, increment refcount */
     uint32_t slot = it->second;
     g_slots[slot].refcount++;
-    printf("Reusing slot %u for flow %08x->%08x (refcount=%d)\n", slot, src_ip,
-           dst_ip, g_slots[slot].refcount);
+    char src_buf[INET_ADDRSTRLEN];
+    char dst_buf[INET_ADDRSTRLEN];
+    printf("Reusing slot %u for flow %s->%s (refcount=%d)\n", slot,
+           ip_to_str(src_ip, src_buf, sizeof(src_buf)),
+           ip_to_str(dst_ip, dst_buf, sizeof(dst_buf)), g_slots[slot].refcount);
     return slot;
   }
 
@@ -161,7 +174,11 @@ uint32_t slot_find_or_allocate(uint32_t src_ip, uint32_t dst_ip,
     mpib_hint_write(&shm->entries[slot], initial_bw);
   }
 
-  printf("Allocated slot %u for flow %08x->%08x\n", slot, src_ip, dst_ip);
+  char src_buf[INET_ADDRSTRLEN];
+  char dst_buf[INET_ADDRSTRLEN];
+  printf("Allocated slot %u for flow %s->%s\n", slot,
+         ip_to_str(src_ip, src_buf, sizeof(src_buf)),
+         ip_to_str(dst_ip, dst_buf, sizeof(dst_buf)));
   return slot;
 }
 
@@ -240,9 +257,15 @@ void ipc_handle_client(int client_fd) {
       return;
     }
 
-    printf("Register: conn_id=0x%08x sout=%08x->%08x sup=%08x->%08x\n",
-           req.conn_id, req.sout_src_ip, req.sout_dst_ip, req.sup_src_ip,
-           req.sup_dst_ip);
+    char sout_src_buf[INET_ADDRSTRLEN];
+    char sout_dst_buf[INET_ADDRSTRLEN];
+    char sup_src_buf[INET_ADDRSTRLEN];
+    char sup_dst_buf[INET_ADDRSTRLEN];
+    printf("Register: conn_id=0x%08x sout=%s->%s sup=%s->%s\n", req.conn_id,
+           ip_to_str(req.sout_src_ip, sout_src_buf, sizeof(sout_src_buf)),
+           ip_to_str(req.sout_dst_ip, sout_dst_buf, sizeof(sout_dst_buf)),
+           ip_to_str(req.sup_src_ip, sup_src_buf, sizeof(sup_src_buf)),
+           ip_to_str(req.sup_dst_ip, sup_dst_buf, sizeof(sup_dst_buf)));
 
     /* Find or allocate slot based on SOUT flow (per design doc) */
     uint32_t slot = slot_find_or_allocate(req.sout_src_ip, req.sout_dst_ip,
