@@ -207,48 +207,65 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       // Else (only SUP active) -> leader = 1 (SUP)
       const int leaderDev = (active_mask & 0x1) ? 0 : 1;
 
-      // Record sizes in cmplsRecords buffer (for leader to write)
-      int *sizesRecord = comm->remCmplsRecords.elems[slot];
-      for (uint32_t i = 0; i < nreqs; i++)
-        sizesRecord[i] = (int)reqs[i]->send.size;
-
       // Compute size_q for IMM encoding
-      // For first implementation: always use sentinel (consult cmplsRecords)
-      const uint32_t size_q = MPIB_IMM_SIZEQ_SENTINEL;
+      // nreqs==1 fast-path: encode actual size in size_q, skip cmplsRecords
+      // nreqs>1 or overflow: use SENTINEL, write cmplsRecords via leader rail
+      const uint32_t size_q = (nreqs == 1) ? mpibSizeToSizeQ(reqs[0]->send.size)
+                                           : MPIB_IMM_SIZEQ_SENTINEL;
+      const bool useFastPath = (size_q != MPIB_IMM_SIZEQ_SENTINEL);
+
+      // Record sizes in cmplsRecords buffer (only needed for slow path)
+      int *sizesRecord = comm->remCmplsRecords.elems[slot];
+      if (!useFastPath) {
+        for (uint32_t i = 0; i < nreqs; i++)
+          sizesRecord[i] = (int)reqs[i]->send.size;
+      }
 
       // Encode IMM data: (slot | mask << 8 | size_q << 10)
       const uint32_t immData =
           mpibImmEncode((uint8_t)slot, active_mask, size_q);
 
-      // Prepare data WRs: all are RDMA_WRITE with next pointing to next WR
-      for (uint32_t r = 0; r < nreqs; r++) {
-        struct ibv_send_wr *wr = comm->wrs + r;
+      // WR construction depends on fast-path vs slow-path
+      struct ibv_send_wr *lastWr;
+
+      if (useFastPath) {
+        // Fast-path (nreqs==1, size fits in size_q):
+        // Single merged WR: data + IMM + SIGNALED
+        struct ibv_send_wr *wr = comm->wrs;
         memset(wr, 0, sizeof(struct ibv_send_wr));
+        wr->wr_id = wr_id;
+        wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+        wr->imm_data = htobe32(immData);
+        wr->send_flags = IBV_SEND_SIGNALED;
+        wr->wr.rdma.remote_addr = slots[0].addr;
+        wr->next = NULL;
+        lastWr = wr;
+      } else {
+        // Slow-path (nreqs>1 or size overflow):
+        // wrs[0..nreqs-1] = data WRs, wrs[nreqs] = signaling WR
+        for (uint32_t r = 0; r < nreqs; r++) {
+          struct ibv_send_wr *wr = comm->wrs + r;
+          memset(wr, 0, sizeof(struct ibv_send_wr));
+          wr->opcode = IBV_WR_RDMA_WRITE;
+          wr->send_flags = 0;
+          wr->wr.rdma.remote_addr = slots[r].addr;
+          wr->next = wr + 1;
+        }
 
-        struct ibv_sge *sge = comm->sges + r;
-        sge->addr = (uintptr_t)reqs[r]->send.data;
-        wr->opcode = IBV_WR_RDMA_WRITE;
-        wr->send_flags = 0;
-        wr->wr.rdma.remote_addr = slots[r].addr;
-        wr->next = wr + 1;
+        // Signaling WR (writes cmplsRecords via leader rail)
+        lastWr = comm->wrs + nreqs;
+        memset(lastWr, 0, sizeof(struct ibv_send_wr));
+        lastWr->wr_id = wr_id;
+        lastWr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+        lastWr->imm_data = htobe32(immData);
+        lastWr->send_flags = IBV_SEND_SIGNALED;
+        lastWr->wr.rdma.remote_addr =
+            comm->remCmplsRecords.addr + (uint64_t)slot *
+                                             (uint64_t)MPIB_NET_IB_MAX_RECVS *
+                                             (uint64_t)sizeof(int);
+        comm->wrs[nreqs - 1].next = lastWr;
+        lastWr->next = NULL;
       }
-
-      // Set up lastWr for completion signaling
-      // For first impl, always use a separate WR for signaling to avoid SGE
-      // conflicts wrs[0..nreqs-1] = data WRs, wrs[nreqs] = signaling WR
-      struct ibv_send_wr *lastWr = comm->wrs + nreqs;
-      memset(lastWr, 0, sizeof(struct ibv_send_wr));
-      lastWr->wr.rdma.remote_addr =
-          comm->remCmplsRecords.addr + (uint64_t)slot *
-                                           (uint64_t)MPIB_NET_IB_MAX_RECVS *
-                                           (uint64_t)sizeof(int);
-      // Link the last data WR to the signaling WR
-      comm->wrs[nreqs - 1].next = lastWr;
-      lastWr->wr_id = wr_id;
-      lastWr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-      lastWr->imm_data = htobe32(immData);
-      lastWr->next = NULL;
-      lastWr->send_flags = IBV_SEND_SIGNALED;
 
       // Post WRs only to active rails
       const int nqps = mpibCommBaseGetNqpsPerRequest(&comm->base);
@@ -267,40 +284,59 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
         // Add event for this active device
         mpibAddEvent(req, devIndex);
 
-        // Set up all data WRs (wrs[0..nreqs-1]) for this device
-        for (uint32_t j = 0; j < nreqs; j++) {
-          comm->wrs[j].wr.rdma.rkey = slots[j].rkeys[qpPtr->remDevIdx];
+        if (useFastPath) {
+          // Fast-path: single merged WR (data + IMM)
+          const size_t devBaseOffset = (devIndex == 0) ? 0 : sizeSout[0];
+          const size_t length = (devIndex == 0) ? sizeSout[0] : sizeSup[0];
 
-          const size_t devBaseOffset = (devIndex == 0) ? 0 : sizeSout[j];
-          const size_t length = (devIndex == 0) ? sizeSout[j] : sizeSup[j];
-
+          lastWr->wr.rdma.rkey = slots[0].rkeys[qpPtr->remDevIdx];
           if (length <= 0) {
-            comm->wrs[j].sg_list = NULL;
-            comm->wrs[j].num_sge = 0;
+            lastWr->sg_list = NULL;
+            lastWr->num_sge = 0;
           } else {
-            comm->sges[j].lkey = reqs[j]->send.lkeys[devIndex];
-            comm->sges[j].length = length;
-            comm->sges[j].addr = (uintptr_t)reqs[j]->send.data + devBaseOffset;
-            comm->wrs[j].wr.rdma.remote_addr = slots[j].addr + devBaseOffset;
-            comm->wrs[j].sg_list = comm->sges + j;
-            comm->wrs[j].num_sge = 1;
+            comm->sges[0].lkey = reqs[0]->send.lkeys[devIndex];
+            comm->sges[0].length = length;
+            comm->sges[0].addr = (uintptr_t)reqs[0]->send.data + devBaseOffset;
+            lastWr->wr.rdma.remote_addr = slots[0].addr + devBaseOffset;
+            lastWr->sg_list = comm->sges;
+            lastWr->num_sge = 1;
           }
-        }
-
-        // Leader rail writes cmplsRecords; non-leader sends IMM-only
-        if (devIndex == leaderDev) {
-          // Leader: attach SGE to write sizes to remote cmplsRecords
-          lastWr->sg_list = &(comm->devs[devIndex].sge);
-          lastWr->sg_list[0].addr = (uint64_t)sizesRecord;
-          lastWr->sg_list[0].length = nreqs * sizeof(int);
-          lastWr->num_sge = 1;
-          lastWr->wr.rdma.rkey = comm->remCmplsRecords.rkeys[qpPtr->remDevIdx];
         } else {
-          // Non-leader: IMM-only (no SGE for cmplsRecords)
-          lastWr->sg_list = NULL;
-          lastWr->num_sge = 0;
-          // Still need rkey for the RDMA_WRITE_WITH_IMM (even if 0 bytes)
-          lastWr->wr.rdma.rkey = comm->remCmplsRecords.rkeys[qpPtr->remDevIdx];
+          // Slow-path: set up data WRs (wrs[0..nreqs-1]) for this device
+          for (uint32_t j = 0; j < nreqs; j++) {
+            comm->wrs[j].wr.rdma.rkey = slots[j].rkeys[qpPtr->remDevIdx];
+
+            const size_t devBaseOffset = (devIndex == 0) ? 0 : sizeSout[j];
+            const size_t length = (devIndex == 0) ? sizeSout[j] : sizeSup[j];
+
+            if (length <= 0) {
+              comm->wrs[j].sg_list = NULL;
+              comm->wrs[j].num_sge = 0;
+            } else {
+              comm->sges[j].lkey = reqs[j]->send.lkeys[devIndex];
+              comm->sges[j].length = length;
+              comm->sges[j].addr =
+                  (uintptr_t)reqs[j]->send.data + devBaseOffset;
+              comm->wrs[j].wr.rdma.remote_addr = slots[j].addr + devBaseOffset;
+              comm->wrs[j].sg_list = comm->sges + j;
+              comm->wrs[j].num_sge = 1;
+            }
+          }
+
+          // Leader rail writes cmplsRecords; non-leader sends IMM-only
+          if (devIndex == leaderDev) {
+            lastWr->sg_list = &(comm->devs[devIndex].sge);
+            lastWr->sg_list[0].addr = (uint64_t)sizesRecord;
+            lastWr->sg_list[0].length = nreqs * sizeof(int);
+            lastWr->num_sge = 1;
+            lastWr->wr.rdma.rkey =
+                comm->remCmplsRecords.rkeys[qpPtr->remDevIdx];
+          } else {
+            lastWr->sg_list = NULL;
+            lastWr->num_sge = 0;
+            lastWr->wr.rdma.rkey =
+                comm->remCmplsRecords.rkeys[qpPtr->remDevIdx];
+          }
         }
 
         struct ibv_send_wr *bad_wr;
@@ -509,11 +545,13 @@ mpibCompletionEventProcess(struct mpibNetCommBase *commBase, struct ibv_wc *wc,
       devBase->srqPosted--;
     }
 
-    // Size handling: read from cmplsRecords (always, for first implementation)
-    // Note: req->recv.sizes was set up in mpibPostFifo to point to
-    // cmplsRecords[slot] The sender writes sizes there via leader rail, so
-    // sizes are already in place. For size_q != SENTINEL optimization (future):
-    // could decode size from imm.
+    // Size handling:
+    // - Fast-path (size_q != SENTINEL): decode size directly from IMM
+    // - Slow-path (size_q == SENTINEL): sizes already in cmplsRecords
+    if (size_q != MPIB_IMM_SIZEQ_SENTINEL) {
+      req->recv.sizes[0] = (int)mpibSizeQToSize(size_q);
+    }
+    // else: sizes were written by sender via cmplsRecords (already in place)
 
     return ncclSuccess;
   }

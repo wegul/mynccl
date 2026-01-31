@@ -62,6 +62,16 @@ static inline void mpibImmDecode(uint32_t imm, uint8_t *slot, uint8_t *mask,
   *size_q = (imm >> 10) & MPIB_IMM_SIZEQ_SENTINEL;
 }
 
+// Size <-> size_q conversion (assumes 128B alignment)
+// Max encodable: (SENTINEL - 1) * 128 = ~512 MiB
+static inline uint32_t mpibSizeToSizeQ(size_t bytes) {
+  uint32_t size_q = (uint32_t)(bytes / MPIB_IMM_SIZE_GRANULARITY);
+  return (size_q >= MPIB_IMM_SIZEQ_SENTINEL) ? MPIB_IMM_SIZEQ_SENTINEL : size_q;
+}
+static inline size_t mpibSizeQToSize(uint32_t size_q) {
+  return (size_t)size_q * MPIB_IMM_SIZE_GRANULARITY;
+}
+
 #define MAX_MERGED_DEV_NAME (MAXNAMESIZE * MPIB_MAX_DEVS) + MPIB_MAX_DEVS
 struct alignas(64) mpibMergedDev {
   ncclNetVDeviceProps_t vProps;
