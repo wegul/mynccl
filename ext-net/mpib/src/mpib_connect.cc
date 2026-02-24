@@ -21,7 +21,7 @@ MPIB_PARAM(SupQp, "SUP_QP", 4);
 static std::atomic<uint16_t> g_mpib_conn_counter{0};
 
 /* Include shared interface for MPIB_MAKE_CONN_ID */
-#include "../../transport_agent/include/mpib_agent_iface.h"
+#include "../include/mpib_agent_iface.h"
 
 struct mpibQpInfo {
   uint32_t qpn;

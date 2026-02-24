@@ -18,7 +18,7 @@
 #include <unistd.h>
 
 /* Include the shared interface definitions */
-#include "../../transport_agent/include/mpib_agent_iface.h"
+#include "../include/mpib_agent_iface.h"
 
 /* ============================================================================
  * Global State
