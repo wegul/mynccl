@@ -7,7 +7,6 @@ static ncclResult_t mpibRegMrDmaBufInternal2(mpibNetCommDevBase *base,
                                              ibv_mr **mhandle) {
   (void)type;
   (void)offset;
-  (void)mrFlags;
   static thread_local uintptr_t pageSize = 0;
   if (pageSize == 0)
     pageSize = sysconf(_SC_PAGESIZE);
@@ -27,8 +26,17 @@ static ncclResult_t mpibRegMrDmaBufInternal2(mpibNetCommDevBase *base,
       struct ibv_mr *mr;
       unsigned int flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
                            IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC;
-      NCCLCHECK(wrap_ibv_reg_mr(&mr, base->pd, (void *)addr, pages * pageSize,
-                                flags));
+      bool relaxedOrdering = mpibRelaxedOrderingEnabled &&
+                             (mrFlags & NCCL_NET_MR_FLAG_FORCE_SO) == 0;
+      if (relaxedOrdering)
+        flags |= IBV_ACCESS_RELAXED_ORDERING;
+      if (relaxedOrdering) {
+        NCCLCHECK(wrap_ibv_reg_mr_iova2(&mr, base->pd, (void *)addr,
+                                        pages * pageSize, addr, flags));
+      } else {
+        NCCLCHECK(wrap_ibv_reg_mr(&mr, base->pd, (void *)addr, pages * pageSize,
+                                  flags));
+      }
       TRACE(NCCL_INIT | NCCL_NET,
             "regAddr=0x%lx size=%lld rkey=0x%x lkey=0x%x fd=%d",
             (unsigned long)addr, (long long)pages * pageSize, mr->rkey,

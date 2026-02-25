@@ -4,6 +4,7 @@ set(SRC_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_init.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_connect.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_p2p.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_gdr.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_reg.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_param.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mpib_socket.cc

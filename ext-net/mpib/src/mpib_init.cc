@@ -200,11 +200,15 @@ static ncclResult_t mpibInitDevices(ncclDebugLogger_t logFunction,
       mpibMergedDevs[0].speed = mpibDevs[0].speed + mpibDevs[1].speed;
       mpibNMergedIbDevs = 1;
 
+      // Detect relaxed ordering capability (IBVERBS_1.8 iova2 API)
+      mpibRelaxedOrderingEnabled = wrap_ibv_reg_mr_iova2_supported();
+
       char addrline[MPIB_SOCKET_NAME_MAXLEN + 1];
       INFO(NCCL_INIT | NCCL_NET,
-           "NET/MPIB : Using [0]%s:SOUT [1]%s:SUP speed=%d; OOB %s:%s",
+           "NET/MPIB : Using [0]%s:SOUT [1]%s:SUP speed=%d%s; OOB %s:%s",
            mpibDevs[0].devName, mpibDevs[1].devName,
-           mpibDevs[0].speed + mpibDevs[1].speed, mpibIfName,
+           mpibDevs[0].speed + mpibDevs[1].speed,
+           mpibRelaxedOrderingEnabled ? " [RO]" : "", mpibIfName,
            mpibSocketToString(&mpibIfAddr, addrline));
     }
   }
@@ -263,6 +267,8 @@ __hidden ncclResult_t mpibGetProperties(int dev, ncclNetProperties_t *props) {
   props->pciPath = ibDev->pciPath;
   props->guid = ibDev->guid;
   props->ptrSupport = NCCL_PTR_HOST;
+  if (mpibGdrSupport() == ncclSuccess)
+    props->ptrSupport |= NCCL_PTR_CUDA;
   props->regIsGlobal = 1;
   props->forceFlush = 0;
   props->latency = 0;

@@ -386,3 +386,7 @@ ncclResult_t mpibRegMr(void *comm, void *data, size_t size, int type,
 ncclResult_t mpibRegMrDmaBuf(void *comm, void *data, size_t size, int type,
                              uint64_t offset, int fd, void **mhandle);
 ncclResult_t mpibDeregMr(void *comm, void *mhandle);
+
+// GDR support detection (mpib_gdr.cc)
+ncclResult_t mpibGdrSupport();
+ncclResult_t mpibDmaBufSupport(int dev);
