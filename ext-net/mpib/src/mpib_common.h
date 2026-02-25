@@ -101,6 +101,7 @@ struct alignas(64) mpibDev {
   struct ibv_port_attr portAttr;
   struct mpibStats stats;
   enum mpibProvider ibProvider;
+  int dmaBufSupported; // 1=yes, -1=no, 0=untested
 };
 
 #define MAX_IB_DEVS 32

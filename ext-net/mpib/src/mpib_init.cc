@@ -269,6 +269,8 @@ __hidden ncclResult_t mpibGetProperties(int dev, ncclNetProperties_t *props) {
   props->ptrSupport = NCCL_PTR_HOST;
   if (mpibGdrSupport() == ncclSuccess)
     props->ptrSupport |= NCCL_PTR_CUDA;
+  if (mpibDmaBufSupport(0) == ncclSuccess)
+    props->ptrSupport |= NCCL_PTR_DMABUF;
   props->regIsGlobal = 1;
   props->forceFlush = 0;
   props->latency = 0;
