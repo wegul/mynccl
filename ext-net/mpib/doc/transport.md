@@ -7,23 +7,24 @@ The MPIB (Multi-Path IB) plugin enables heterogeneous multi-rail data transfer f
 **Key Features:**
 
 * **Static Fusion:** Hides physical topology from NCCL; reports aggregate bandwidth.
-* **Agent-Driven Routing:** (Phase 4) A sidecar daemon controls traffic splits via shared memory (weights 0.0–1.0).
-* **Dynamic Splitting:** Supports both whole message WR and fragmentation based on weights.
-* **Multi-QP Support:** Configurable number of QPs per physical NIC.
+* **Path Isolation:** Topology-aware classification suppresses SUP QPs when the SUP fabric is unreachable (inter-island vanilla). See [path_isolation.md](path_isolation.md).
+* **Dynamic Splitting:** Per-transfer SOUT/SUP split via `mpibGetSupBw()`. Integer-only arithmetic (no floats on hot path).
+* **Multi-QP Support:** Configurable QP count per rail (`MPIB_SOUT_QP`, `MPIB_SUP_QP`).
+* **Agent-Ready:** SHM hint interface (`mpib_agent_iface.h`) for future agent-driven multipath (advanced mode).
 
 **Current Status (vs. Design):**
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Single-NIC data path | ✅ Done | net_ib fork working with `NCCL_IB_HCA` |
 | Multi-NIC enumeration | ✅ Done | `MPIB_HCA_SOUT` / `MPIB_HCA_SUP` env vars |
-| Multi-rail QP setup | ✅ Done | 2 QPs per connection (one per NIC) |
-| Static splitting | ✅ Done | 50/50 split works; uses net_ib-style per-QP IMM |
+| Multi-rail QP setup | ✅ Done | Configurable per-rail QPs (`MPIB_SOUT_QP=2`, `MPIB_SUP_QP=4`) |
+| Path isolation (vanilla) | ✅ Done | Island classification; SUP QP suppression for inter-island. See [path_isolation.md](path_isolation.md) |
+| Dynamic splitting | ✅ Done | `mpibGetSupBw()` + `mpibComputeSupBytes()`, integer-only |
 | SRQ + dynamic rail skipping | ✅ Done | Per-device SRQ; inactive rails skipped entirely; see [dual-rail-cqe.md](dual-rail-cqe.md) |
 | GDR (nv_peermem) | ✅ Done | `NCCL_PTR_CUDA` advertised; GPU MR via `ibv_reg_mr` transparent |
 | Relaxed ordering | ✅ Done | `ibv_reg_mr_iova2` + `IBV_ACCESS_RELAXED_ORDERING`, default on |
 | Flush (`iflush`) | ✅ Done (no-op) | PCIe ordering makes flush unnecessary — see §9 |
-| Agent integration | ❌ Phase 4 | Deferred |
+| Agent SHM interface | ✅ Done | `mpib_agent_iface.h` seqlock-based hints; agent daemon not yet implemented |
 
 ### Notes: Multi-Rail Correctness
 
@@ -43,35 +44,167 @@ the full SRQ design.
 Stateless executor.
 
 * **Init:** Enumerates 2 NICs (via `MPIB_HCA_SOUT` / `MPIB_HCA_SUP`), builds merged vDev.
-* **Connect:** Establishes QPs on *both* NICs for every connection.
-* **Data Path:** Reads policy (static weight for bring-up) -> Fragments data -> Posts to QPs.
+* **Connect:** Classifies path (intra/inter-island), creates QPs (suppresses SUP if unreachable).
+* **Data Path:** Reads policy via `mpibGetSupBw()` -> Splits data -> Posts to active QPs.
 * **Progress:** Polls all CQs -> Aggregates completions.
 
-### B. The Agent (Policy) — *Phase 4*
+### B. The Agent (Policy) — *Future*
 
-Intelligent controller (outside plugin scope).
+Intelligent controller (outside plugin scope). Not yet implemented.
 
-* **Role:** Monitoring topology, congestion, and link health.
-* **Output:** Updates the `mpib_policy_shm` table.
-* **Example Policies:**
-  * *Singlepath:* `Rank_X: {NIC1_Weight=1.0}`
-  * *Multipath:* `Rank_Y: {NIC1_Weight=0.5}`
+* **Role:** Monitor topology, congestion, and link health.
+* **Output:** Write per-flow SUP bandwidth hints to SHM.
+* **Interface:** Parts-per-1024 encoding via seqlock (no floats).
 
-### C. Shared Memory Interface — *Phase 4*
+In vanilla mode (`MPIB_MODE=0`), the agent is not needed — the plugin uses
+topology-driven path isolation. In advanced mode (`MPIB_MODE=1`), the plugin
+reads agent hints from SHM on every `isend()`. See [path_isolation.md](path_isolation.md) §4.
 
-Read-only for Plugin, Read-Write for Agent.
+### C. Agent–Plugin Interface
+
+All definitions live in `include/mpib_agent_iface.h`. The interface has two
+parts: a **registration IPC** (Unix domain socket) for connection lifecycle,
+and a **hint SHM** (memory-mapped file) for per-transfer policy.
+
+#### C.1 Registration IPC (Unix Socket)
+
+Path: `/tmp/mpib/agent.sock`
+
+When a connection is established (`connect`/`accept`), the plugin sends a
+registration request to the agent daemon. The agent assigns a `hint_slot`
+index, which the plugin stores in `comm->hint_slot` for the lifetime of the
+connection. On `closeSend`/`closeRecv`, the plugin sends a deregistration.
+
+```
+Plugin                                  Agent
+  │                                       │
+  ├── REGISTER ───────────────────────>   │
+  │   {conn_id, sout_src_ip,             │
+  │    sout_dst_ip, sup_src_ip,           │
+  │    sup_dst_ip}                        │
+  │                                       │
+  │   <──── RESPONSE ─────────────────   │
+  │   {status, hint_slot}                 │
+  │                                       │
+  │   ... data transfers ...              │
+  │   (plugin reads SHM[hint_slot]        │
+  │    on every isend)                    │
+  │                                       │
+  ├── DEREGISTER ─────────────────────>   │
+  │   {conn_id}                           │
+```
+
+The `conn_id` is `(PID << 16 | counter)`, unique per connection per process.
+IP addresses are in network byte order. The agent uses the SOUT src/dst pair
+to identify the flow and decide what `sup_bw` value to write.
+
+#### C.2 Hint SHM Layout
+
+Path: `/tmp/mpib/hints` (memory-mapped file, 4112 bytes)
 
 ```c
-struct mpib_policy_entry {
-    _Atomic float nic1_weight; // 0.0 (All NIC0) to 1.0 (All NIC1)
-    _Atomic uint32_t version;  // For coherency checks
+struct mpib_hint_shm {
+    struct mpib_hint_header header;                       // 16 bytes
+    struct mpib_hint_entry entries[MPIB_HINT_MAX_ENTRIES]; // 256 × 16 bytes
 };
 
-struct mpib_policy_shm {
-    uint32_t magic;
-    struct mpib_policy_entry peers[MAX_RANKS]; 
+struct mpib_hint_header {
+    uint32_t magic;        // Must be 0x4D504948 ("MPIH")
+    uint32_t max_entries;  // 256
+};
+
+struct mpib_hint_entry {
+    uint32_t sup_bw;  // SUP share, parts-per-1024 [0..1024]
+    uint32_t seq;     // Seqlock sequence number
+    uint32_t src_ip;  // SOUT source IP (network byte order)
+    uint32_t dst_ip;  // SOUT destination IP (network byte order)
 };
 ```
+
+#### C.3 Seqlock Protocol
+
+**Agent writes** (write side of seqlock):
+```c
+mpib_hint_write(&entries[slot], new_sup_bw);
+// Internally: seq++ (odd → write in progress), write sup_bw, seq++ (even → done)
+```
+
+**Plugin reads** (read side, called on every `isend` in advanced mode):
+```c
+uint32_t bw = mpib_hint_read_raw(&entries[slot]);
+// Internally: spin while seq is odd; retry if seq changed during read
+```
+
+Lock-free, wait-free on the reader side (bounded retries). The agent must not
+hold the write lock for extended periods.
+
+#### C.4 How the Plugin Interprets `sup_bw`
+
+The `sup_bw` value from SHM flows through two functions:
+
+**Step 1: `mpibGetSupBw(comm, size)`** — policy entry point (called per `isend`):
+```c
+if (mode == 0)  // vanilla — never reaches SHM
+    return (pathClass == INTRA) ? UINT32_MAX : 0;
+if (mode == 1)  // advanced — read agent hint
+    return mpib_hint_read_raw(&shm->entries[comm->hint_slot]);
+```
+
+**Step 2: `mpibComputeSupBytes(sup_bw, reqSize)`** — converts to byte count:
+```c
+if (sup_bw == 0)     return 0;                           // 100% SOUT
+if (sup_bw >= 1024)  return reqSize;                     // 100% SUP
+return (size_t)(((uint64_t)reqSize * sup_bw) >> 10);     // proportional split
+```
+
+The result is then 128B-aligned and used to compute `sizeSout` / `sizeSup` per
+request. Only rails with non-zero bytes are activated (`active_mask`).
+
+**Agent-facing contract:**
+
+| `sup_bw` written by agent | Plugin behavior |
+|--------------------------|-----------------|
+| `0` | All data on SOUT. SUP rail idle. |
+| `1`–`1023` | Proportional split: SUP gets `reqSize × sup_bw / 1024` bytes (128B aligned). Both rails active. |
+| `1024` | All data on SUP. SOUT rail idle (except CTS which always uses SOUT in advanced mode). |
+| Not written (default `0`) | Same as `0` — all SOUT. Safe default for unregistered slots. |
+
+**Numeric examples** (for `reqSize = 1 MB = 1048576 bytes`):
+
+| `sup_bw` | SUP bytes | SOUT bytes | `active_mask` |
+|----------|-----------|------------|---------------|
+| `0` | 0 | 1048576 | `0x1` (SOUT only) |
+| `256` | 262144 (25%) | 786432 | `0x3` (both) |
+| `512` | 524288 (50%) | 524288 | `0x3` (both) |
+| `768` | 786432 (75%) | 262144 | `0x3` (both) |
+| `1024` | 1048576 | 0 | `0x2` (SUP only) |
+
+**Important:** The plugin does not clamp or validate `sup_bw` beyond the
+`>= 1024` check. Values in `[1025, UINT32_MAX)` are treated as 100% SUP
+(same as `1024`). The agent should only write values in `[0, 1024]`.
+
+#### C.5 Timing and Latency
+
+- The plugin reads SHM **once per `isend()` call**, not per byte or per WR.
+- The read is a single `uint32_t` load behind a seqlock (typically 1–2 cache
+  line reads, < 100 ns).
+- The agent can update `sup_bw` at any rate. Changes take effect on the
+  **next** `isend()` — there is no batching or buffering.
+- If the agent is not running, all SHM entries remain at their initial value
+  (`0`), which means 100% SOUT. This is a safe degradation.
+
+#### C.6 Future Extension: BDP Threshold
+
+`mpibGetSupBw()` accepts a `size` parameter (currently unused). A future
+enhancement will skip the SHM read for small inter-island transfers:
+
+```c
+if (mode == 1 && pc == INTER_ISLAND && size <= BDP_THRESHOLD)
+    return 0;  // Small message → SOUT only, skip relay overhead
+```
+
+This requires no agent changes — the plugin unilaterally overrides the hint
+for small messages.
 
 ---
 
@@ -82,7 +215,7 @@ struct mpib_policy_shm {
 We bypass `makeVDevice`. The binding is implicit: **Logical Device 0 ≡ All Physical Devices**.
 
 * **`init()`**:
-  * Reads `MPIB_HCA_SOUT` (scaleout NIC, e.g., `"mlx5_3"`) and `MPIB_HCA_SUP` (scaleup NIC, e.g., `"mlx5_4"`).
+  * Reads `MPIB_HCA_SOUT` (scaleout NIC, e.g., `"mlx5_0"`) and `MPIB_HCA_SUP` (scaleup NIC, e.g., `"mlx5_1"`).
   * Opens both HCAs: `mpibDevs[0]` = SOUT, `mpibDevs[1]` = SUP.
   * Creates single merged vDev: `mpibMergedDevs[0].vProps = {ndevs=2, devs=[0,1]}`.
 * **`devices()`**: Returns `1` (single fused vDev).
@@ -107,18 +240,28 @@ struct mpibConnectionMetadata {
 };
 ```
 
-**`connect(dev=0, handle)` Logic (current impl):**
+**`connect(dev=0, handle)` Logic:**
 
-1. Exchange `vProps` (local/remote rail counts).
-2. Read `MPIB_SOUT_QP` (default 1) and `MPIB_SUP_QP` (default 1) for per-device QP counts.
-3. `nqps = nqpsSout + nqpsSup` — total QPs across both devices.
-4. QP array layout is **contiguous by device**: `[SOUT_0, ..., SOUT_{n-1}, SUP_0, ..., SUP_{m-1}]`
-5. For each QP index `q in [0, nqps)`:
+1. Exchange `vProps` (local/remote rail counts) over TCP.
+2. **Path classification** from TCP socket addresses (before any QP creation):
+   * Extract local SOUT IP from `mpibIfAddr`, remote SOUT IP from `handle->connectAddr`.
+   * `mpibIsSameIsland(local, remote)` → `pathClass` (INTRA or INTER).
+   * Cache `MPIB_MODE` → `base.mode`.
+3. Read `MPIB_SOUT_QP` (default 2) and `MPIB_SUP_QP` (default 4) for per-device QP counts.
+4. **SUP QP suppression** (vanilla inter-island only):
+   * If `mode == 0 && pathClass == INTER_ISLAND`: set `nqpsSup = 0`.
+   * Both sides compute this independently from the same socket IPs, so QP counts agree.
+5. `nqps = nqpsSout + nqpsSup` — total QPs across both devices.
+6. QP array layout is **contiguous by device**: `[SOUT_0, ..., SOUT_{n-1}, SUP_0, ..., SUP_{m-1}]`
+7. For each QP index `q in [0, nqps)`:
    * `devIndex = (q < nqpsSout) ? 0 : 1`
    * Create QP on `mpibDevs[devIndex]`
    * Store `qp->devIndex = devIndex`
-6. Exchange metadata (includes `nqpsSout`, `nqpsSup` for validation), call `mpibRtrQp` / `mpibRtsQp`.
-7. Map `remDevIdx` for striping remote rkeys.
+8. Exchange metadata (includes `nqpsSout`, `nqpsSup` for validation), call `mpibRtrQp` / `mpibRtsQp`.
+9. Map `remDevIdx` for striping remote rkeys.
+
+`mpibAccept` follows the same classification logic, extracting the remote IP from
+`rComm->base.sock.addr` (the accepted TCP connection’s peer address).
 
 ### III. QP Selection & Striping Strategy
 
@@ -132,8 +275,8 @@ MPIB uses a two-level data distribution strategy:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MPIB_SOUT_QP` | 1 | Number of QPs on SOUT device |
-| `MPIB_SUP_QP` | 1 | Number of QPs on SUP device |
+| `MPIB_SOUT_QP` | 2 | Number of QPs on SOUT device |
+| `MPIB_SUP_QP` | 4 | Number of QPs on SUP device |
 
 **QP Array Layout:**
 
@@ -171,26 +314,42 @@ This ensures all QPs in each device pool are utilized evenly across requests.
 
 **CTS QP Selection:**
 
-The receiver's CTS (Clear-To-Send) RDMA_WRITE uses a **fixed QP per device** (not round-robin). This matches net_ib's design:
+CTS is pinned to a **single rail** per connection, selected by path isolation policy:
 
 ```c
-uint32_t dev = fifoHead % ndevs;  // Alternates 0, 1, 0, 1, ...
-// CTS always uses the first QP on the selected device:
-// - dev 0 (SOUT): qps[0]
-// - dev 1 (SUP):  qps[nqpsSout]
+if (mode == 0) {
+    // Vanilla: CTS follows strict path isolation
+    if (pathClass == INTRA_ISLAND)
+        ctsQp = qps[nqpsSout];  // SUP
+    else
+        ctsQp = qps[0];         // SOUT
+} else {
+    // Advanced: CTS always on SOUT
+    ctsQp = qps[0];
+}
 ```
 
-**Why not round-robin for CTS?** CTS is control-plane traffic (small, frequent). Pinning it to one QP per device enables the simple signaling rule `slot == devIndex`, which guarantees each CTS QP gets periodic signaled completions. Round-robin CTS across multiple QPs would require complex per-QP sequence tracking to avoid send queue overflow.
+**Why pin CTS to one rail?** CTS is control-plane traffic (small, frequent).
+Pinning to a single QP simplifies signaling: signal every `MPIB_CTS_SIGNAL_INTERVAL`
+slots (default 128) to drain the CTS QP without complex per-QP sequence tracking.
 
 **CTS Signaling:**
 
 ```c
-if (slot == ctsQp->devIndex) {
+if ((slot % MPIB_CTS_SIGNAL_INTERVAL) == 0) {
     wr.send_flags |= IBV_SEND_SIGNALED;
 }
 ```
 
-With 2 devices, device 0's CTS QP signals at slots 0, 2, 4, ... and device 1's CTS QP signals at slots 1, 3, 5, ... ensuring both queues drain.
+**Suppressed SUP QPs:** When `nqpsSup == 0` (inter-island vanilla), the `qps[]` slots
+beyond `nqpsSout` are zero-initialized (`qp == NULL`). The data path guards against
+this:
+
+```c
+if (qpPtr->qp == NULL) continue;  // SUP suppressed → skip
+```
+
+See [path_isolation.md](path_isolation.md) §6 for QP layout details.
 
 **Key Implementation Functions:**
 
@@ -206,11 +365,18 @@ With 2 devices, device 0's CTS QP signals at slots 0, 2, 4, ... and device 1's C
 
 1. Wait for CTS slot (`slots[0].idx == fifoHead+1`).
 2. Allocate `mpibRequest`, set `type = MPIB_NET_IB_REQ_SEND`.
-3. For each device `i in [0, ndevs)`:
+3. Compute data split:
+   * `sup_bw = mpibGetSupBw(comm, size)` — returns parts-per-1024 or sentinel.
+   * `sup_bytes = mpibComputeSupBytes(sup_bw, reqSize)` — integer-only, 128B aligned.
+   * `sizeSout[r] = reqSize - sup_bytes`, `sizeSup[r] = sup_bytes`.
+4. Compute `active_mask` (bit0=SOUT, bit1=SUP) from non-zero sizes.
+5. For each device `i in [0, ndevs)`:
    * Call `mpibCommBaseGetQpForRequest(comm, fifoHead, i, &qp, &qpIndex)`
+   * If `qp->qp == NULL`: skip (SUP suppressed for inter-island vanilla)
+   * If `!(active_mask & devBit)`: skip (device has 0 bytes this transfer)
    * Call `mpibAddEvent(req, qp->devIndex)` to track expected completion
-4. Build and post WRs for each selected QP (one per device).
-5. Increment `fifoHead`, return `*request = req`.
+6. Build and post WR chain for each active QP.
+7. Increment `fifoHead`, return `*request = req`.
 
 **WR chain structure (per active QP):**
 
@@ -221,9 +387,13 @@ wrs[nreqs]:      IBV_WR_RDMA_WRITE_WITH_IMM (signaling WR, signaled)
 
 The signaling WR carries `imm_data = (slot | active_mask << 8 | size_q << 10)`. On the leader rail it also writes completion sizes to `remCmplsRecords`; on non-leader rails it is IMM-only (`num_sge=0`).
 
-**Data Split (MPIB-CUSTOM):**
+**Data Split:**
 
-Each request's data is split between devices based on agent hints (128B aligned). The sender computes `active_mask` (bit0=SOUT, bit1=SUP) and **only posts to active rails** — inactive rails are skipped entirely.
+Each request's data is split between SOUT and SUP based on `mpibGetSupBw()`, which
+returns a topology-driven constant in vanilla mode or an agent hint in advanced mode.
+`mpibComputeSupBytes()` converts the parts-per-1024 value to a byte count using
+integer-only arithmetic (no floats). The sender computes `active_mask` (bit0=SOUT,
+bit1=SUP) and **only posts to active rails** — inactive rails are skipped entirely.
 
 **Completion model:**
 
@@ -241,304 +411,39 @@ SRQ refill (`mpibSrqCheckAndRefill`) runs in both `irecv` and `test` to prevent 
 
 ---
 
-## 4. Implementation Steps (Revised)
+## 4. Implementation History
 
-### Phase 1: Single-NIC Baseline ✅ (Current State)
+All phases below are complete. Listed for historical context.
 
-**Status:** Complete. The plugin loads, connects, and transfers data with one HCA.
+### Phase 1: Single-NIC Baseline ✅
 
-**What's Working:**
-* `init()` opens one HCA via `NCCL_IB_HCA`.
-* `devices()` returns 1, `getProperties()` returns correct speed/pciPath.
-* `listen/connect/accept` complete TCP+QP handshake.
-* `isend/irecv/test` work with CTS FIFO protocol.
-* Testbench skeleton exists in `ext-net/mpib/testbench/`.
+Forked net_ib. Single HCA via `NCCL_IB_HCA`. Validated with `launch_nccl.sh`.
 
-**Validation:** Use `launch_nccl.sh` with single HCA:
+### Phase 2: Dual-NIC Enumeration & Connection ✅
 
-```bash
-# In ext-net/mpib/scripts/launch_nccl.sh, set NCCL_IB_HCA=mlx5_3
-./scripts/launch_nccl.sh
-# Expect: NCCL loads mpib, transfers complete, no errors
-```
+Added `MPIB_HCA_SOUT` / `MPIB_HCA_SUP` env vars. Opens two HCAs, creates merged
+vDev with `ndevs=2`. Multi-rail QP creation in `connect`/`accept`.
 
----
+### Phase 3: Data Splitting & SRQ ✅
 
-### Phase 2: Dual-NIC Enumeration & Connection
+Implemented per-request data split between SOUT and SUP. SRQ + mask-learning
+protocol for dynamic rail skipping (see [dual-rail-cqe.md](dual-rail-cqe.md)).
+Integer-only split via `mpibComputeSupBytes()` — no floats on hot path.
 
-**Goal:** Open two HCAs, create QPs on both, verify connections.
+### Phase 4: Path Isolation ✅
 
-#### Step 2.1: Environment & Init Changes
+Island classification from TCP socket addresses. SUP QP suppression for
+inter-island vanilla connections. `mpibGetSupBw()` as the single policy entry
+point. SHM hint interface (`mpib_agent_iface.h`) ready for agent. See
+[path_isolation.md](path_isolation.md).
 
-**New env vars:**
-* `MPIB_HCA_SOUT` — Scaleout NIC (e.g., `"mlx5_3"`)
-* `MPIB_HCA_SUP` — Scaleup NIC (e.g., `"mlx5_4"`)
+### Phase 5: Agent Daemon (Future)
 
-**File:** [mpib_init.cc](../src/mpib_init.cc)
-
-**Changes:**
-
-1. Replace `NCCL_IB_HCA` parsing with:
-   ```c
-   const char *hcaSout = mpibGetEnv("MPIB_HCA_SOUT");
-   const char *hcaSup  = mpibGetEnv("MPIB_HCA_SUP");
-   if (!hcaSout || !hcaSup) {
-       WARN("NET/MPIB : MPIB_HCA_SOUT and MPIB_HCA_SUP are required");
-       return ncclInvalidUsage;
-   }
-   ```
-
-2. Open both HCAs:
-   ```c
-   // mpibDevs[0] = SOUT
-   NCCLCHECK(mpibOpenDevice(hcaSout, &mpibDevs[0]));
-   // mpibDevs[1] = SUP
-   NCCLCHECK(mpibOpenDevice(hcaSup, &mpibDevs[1]));
-   mpibNIbDevs = 2;
-   ```
-
-3. Create merged vDev:
-   ```c
-   mpibMergedDevs[0].vProps.ndevs = 2;
-   mpibMergedDevs[0].vProps.devs[0] = 0;  // SOUT
-   mpibMergedDevs[0].vProps.devs[1] = 1;  // SUP
-   mpibMergedDevs[0].speed = mpibDevs[0].speed + mpibDevs[1].speed;
-   mpibNMergedIbDevs = 1;
-   ```
-
-**Validation checkpoint:** Update `launch_nccl.sh`:
-```bash
-# Add to launch_nccl.sh:
-MPIB_HCA_SOUT=${MPIB_HCA_SOUT:-mlx5_3}
-MPIB_HCA_SUP=${MPIB_HCA_SUP:-mlx5_4}
-# ...
--x "MPIB_HCA_SOUT=${MPIB_HCA_SOUT}"
--x "MPIB_HCA_SUP=${MPIB_HCA_SUP}"
-
-# Run:
-./scripts/launch_nccl.sh
-# Log should show: "Using [0]mlx5_3:SOUT [1]mlx5_4:SUP"
-```
-
-#### Step 2.2: Connect/Accept Multi-Rail QP Creation
-
-**File:** [mpib_connect.cc](../src/mpib_connect.cc)
-
-The QP creation loop already iterates over `vProps.ndevs`:
-
-```c
-for (int qpIndex = 0; qpIndex < nqps; qpIndex++) {
-    int devIndex = qpIndex % comm->base.vProps.ndevs;
-    mpibInitCommDevBase(comm->base.vProps.devs[devIndex], ...);
-    // creates QP on that device
-}
-```
-
-**Verify:** With `vProps.ndevs=2` and `IB_QPS_PER_CONNECTION=1`:
-* `nqps = 1 * 2 = 2`
-* QP0 on devIndex=0 (mlx5_0)
-* QP1 on devIndex=1 (mlx5_1)
-
-**Changes needed:**
-
-1. Ensure `mpibInitCommDevBase` is idempotent (called once per devIndex, not per QP).
-2. Fix potential double-init: track `comm->devs[devIndex].base.pd != NULL`.
-
-**Validation checkpoint:**
-
-```bash
-# In launch_nccl.sh, set NCCL_DEBUG=TRACE
-./scripts/launch_nccl.sh
-# Should see: mpibCreateQp logs for both SOUT and SUP devices
-```
-
-#### Step 2.3: End-to-End Validation with NCCL Tests
-
-**No separate testbench.** Use `launch_nccl.sh` with `nccl-tests` directly.
-
-**File:** [scripts/launch_nccl.sh](../scripts/launch_nccl.sh)
-
-**Required changes:**
-```bash
-# Replace NCCL_IB_HCA with:
-MPIB_HCA_SOUT=${MPIB_HCA_SOUT:-mlx5_3}
-MPIB_HCA_SUP=${MPIB_HCA_SUP:-mlx5_4}
-
-# Add to MPIRUN env exports:
--x "MPIB_HCA_SOUT=${MPIB_HCA_SOUT}"
--x "MPIB_HCA_SUP=${MPIB_HCA_SUP}"
-
-# Remove or keep NCCL_IB_HCA as fallback for single-NIC mode
-```
-
-**Validation:**
-
-```bash
-# Multi-node test with dual-rail
-MPIB_HCA_SOUT=mlx5_3 MPIB_HCA_SUP=mlx5_4 ./scripts/launch_nccl.sh
-
-# Verify both NICs are used:
-# - Check NCCL_DEBUG output for QP creation on both devices
-# - Monitor with: watch -n1 'ethtool -S mlx5_3 | grep tx_bytes; ethtool -S mlx5_4 | grep tx_bytes'
-```
-
-**Deliverable:** `launch_nccl.sh` successfully runs `all_reduce_perf` with QPs on both SOUT and SUP NICs.
-
----
-
-### Phase 3: Static Message Splitting (Bring-Up)
-
-**Goal:** Split data across rails with a fixed weight. Verify correctness.
-
-#### Step 3.1: Hardcoded Split (No Config)
-
-For bring-up, we **hardcode** a split ratio. No environment variable.
-
-Currently: SOUT gets 100%, SUP gets 0%. This can be changed to 50/50 for dual-rail validation.
-
-#### Step 3.2: WR Construction in `mpibIsend`
-
-**File:** [mpib_p2p.cc](../src/mpib_p2p.cc)
-
-**Implementation:**
-
-WR construction is inlined directly in `mpibIsend()`. For each QP, we build a chain
-where the last WR is `RDMA_WRITE_WITH_IMM` (signaled), and preceding WRs (if any)
-are plain `RDMA_WRITE`.
-
-**Two-level striping logic:**
-
-```c
-// Level 1: Device split
-sizeSout[r] = reqSize;  // 100% to SOUT for now
-sizeSup[r] = 0;         // TODO: configurable split ratio
-
-// Level 2: QP chunk size (128B aligned)
-qpChunkSout[r] = DIVUP(DIVUP(sizeSout[r], nqpsSout), 128) * 128;
-qpChunkSup[r]  = DIVUP(DIVUP(sizeSup[r], nqpsSup), 128) * 128;
-
-// Per-QP posting loop
-for (int i = 0; i < nqps; i++) {
-    qp = getQpForRequest(fifoHead, i);
-    devIndex = qp->devIndex;  // 0=SOUT, 1=SUP
-    
-    for (int r = 0; r < nreqs; r++) {
-        // Compute offset/length based on devIndex and stripe position
-        length = min(devSize - devOffset, chunkSize);
-        
-        if (r == nreqs - 1) {
-            // Last WR: RDMA_WRITE_WITH_IMM, signaled
-            if (nreqs > 1) {
-                // Write completion sizes to remCmplsRecords
-            } else {
-                // Write data directly
-            }
-        } else {
-            // Data-only WR
-        }
-    }
-    
-    ibv_post_send(qp, wrs);
-}
-```
-
-**Key detail:** RDMA_WRITE goes directly to receiver buffer at computed offsets. No receiver-side reassembly needed.
-
-#### Step 3.3: Receiver-Side Offset Handling
-
-The receiver's CTS slots already provide `slots[r].addr` as the base. The sender computes:
-* NIC0 posts: `remote_addr = slots[r].addr`, `length = sizeNic0`
-* NIC1 posts: `remote_addr = slots[r].addr + sizeNic0`, `length = sizeNic1`
-
-No receiver code change needed—RDMA writes directly to user buffer.
-
-#### Step 3.4: Completion Tracking
-
-- **SEND:** One event per active QP via `mpibAddEvent`. `test()` drains `events[]`.
-- **RECV:** SRQ-based. Receiver does not post per-QP recv WRs. Instead, generic WRs are posted to per-device SRQs. Completion uses mask-learning from `imm_data`.
-
-**Validation:**
-
-```bash
-# Run with dual-rail
-MPIB_HCA_SOUT=mlx5_3 MPIB_HCA_SUP=mlx5_4 ./scripts/launch_nccl.sh
-
-# Verify with ethtool counters (run on each node):
-watch -n1 'echo "SOUT:"; ethtool -S mlx5_3 | grep tx_bytes; echo "SUP:"; ethtool -S mlx5_4 | grep tx_bytes'
-```
-
----
-
-### Phase 4: Agent Integration (Deferred)
-
-**Goal:** Replace static weight with runtime-updatable shared memory policy.
-
-#### Step 4.1: Shared Memory Setup
-
-**File:** `mpib_agent.h`, `mpib_agent.cc` (new files)
-
-```c
-#define MPIB_SHM_NAME "/mpib_policy"
-#define MPIB_SHM_MAGIC 0x4D504942
-
-struct mpib_policy_entry {
-    _Atomic float nic1_weight;
-    _Atomic uint32_t version;
-};
-
-struct mpib_policy_shm {
-    uint32_t magic;
-    uint32_t nranks;
-    struct mpib_policy_entry peers[MPIB_MAX_RANKS];
-};
-
-ncclResult_t mpibAgentInit(int rank, int nranks);
-float mpibAgentGetWeight(int peerRank);
-ncclResult_t mpibAgentFinalize(void);
-```
-
-#### Step 4.2: Integrate into Data Path
-
-In `mpibMultiSend`, replace the hardcoded 50/50 split with:
-
-```c
-float w1 = mpibAgentGetWeight(comm->peerRank);
-size_t sizeSup = (size_t)(totalSize * w1);
-size_t sizeSout = totalSize - sizeSup;
-```
-
-#### Step 4.3: Agent Daemon (Python Prototype)
-
-```python
-#!/usr/bin/env python3
-import mmap, struct, time
-
-SHM_PATH = "/dev/shm/mpib_policy"
-MAGIC = 0x4D504942
-
-def set_weight(rank, weight):
-    with open(SHM_PATH, "r+b") as f:
-        mm = mmap.mmap(f.fileno(), 0)
-        # header: magic(4) + nranks(4)
-        offset = 8 + rank * 8  # entry: weight(4) + version(4)
-        mm[offset:offset+4] = struct.pack('f', weight)
-        ver = struct.unpack('I', mm[offset+4:offset+8])[0]
-        mm[offset+4:offset+8] = struct.pack('I', ver + 1)
-        mm.close()
-
-# Example: toggle weight every 5 seconds
-while True:
-    set_weight(0, 0.0); time.sleep(5)
-    set_weight(0, 1.0); time.sleep(5)
-```
-
-#### Step 4.4: Dynamic Split Design
-
-Current implementation uses **design (3)** (fully dynamic, sender decides per-request).
-Previously this had ~15% overhead because inactive rails still posted 0-byte IMMs and
-matching recv WRs. This was resolved by the SRQ + `active_mask` redesign: the sender
-only posts to rails with data, and the receiver learns the active set from `imm_data`.
-See [dual-rail-cqe.md](dual-rail-cqe.md).
+External sidecar daemon that writes per-flow SUP bandwidth hints to SHM.
+Requires relay NIC (DOCA Flow VXLAN overlay) for cross-island SUP traffic.
+Plugin reads hints via `mpibGetSupBw()` in advanced mode (`MPIB_MODE=1`).
+No plugin code changes needed — only `mpibGetSupBw()` already reads SHM when
+`mode == 1`.
 
 ---
 
@@ -546,9 +451,10 @@ See [dual-rail-cqe.md](dual-rail-cqe.md).
 
 | Test | Command | Expected |
 |------|---------|----------|
-| Single-NIC baseline | `NCCL_IB_HCA=mlx5_3 ./scripts/launch_nccl.sh` | Pass, single NIC |
-| Dual-NIC 50/50 | `MPIB_HCA_SOUT=mlx5_3 MPIB_HCA_SUP=mlx5_4 ./scripts/launch_nccl.sh` | Pass, ~equal traffic on both |
-| Agent toggle | (Phase 4) `nccl-tests + agent script` | Traffic shifts dynamically |
+| Intra-island (vanilla) | `MPIB_MODE=0 ./scripts/launch_nccl.sh` (NP=4, same island) | Pass; 100% SUP; `nqps=6` |
+| Inter-island (vanilla) | `MPIB_MODE=0 ./scripts/launch_nccl.sh` (NP=8, cross-island) | Pass; 100% SOUT for cross-island conns; `nqps=2` |
+| Mixed (vanilla) | `MPIB_MODE=0 ./scripts/launch_nccl.sh` (NP=8, tree topology) | Pass; intra=SUP, inter=SOUT |
+| Advanced mode | `MPIB_MODE=1 ./scripts/launch_nccl.sh` + agent | (Future) Agent-driven split |
 
 ---
 
@@ -556,10 +462,11 @@ See [dual-rail-cqe.md](dual-rail-cqe.md).
 
 | Risk | Mitigation |
 |------|------------|
-| Cross-QP ordering with split | Use per-rail IMM (net_ib-style), i.e. one CQE per rail |
+| Cross-QP ordering with split | Per-rail IMM (net_ib-style), one CQE per rail |
 | Uneven MTU across NICs | Take `min(mtu)` in connect handshake |
 | MR registration per-device | `mpibMrHandle.mrs[]` already per-rail |
-| Request tracking overflow | `events[4]` array bounds; assert `devIndex < 4` |
+| SUP QP access when suppressed | `qpPtr->qp == NULL` guard in data path |
+| QP count mismatch (sender/receiver) | Both sides classify independently from same socket IPs |
 
 ---
 
