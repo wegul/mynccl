@@ -18,6 +18,7 @@ MPIB_PARAM(IbEceEnable, "IB_ECE_ENABLE", 1);
 MPIB_PARAM(SoutQp, "SOUT_QP", 2);
 MPIB_PARAM(SupQp, "SUP_QP", 4);
 MPIB_PARAM(IslandPrefixLen, "ISLAND_PREFIX_LEN", 24);
+MPIB_PARAM(Mode, "MODE", 0); // 0=vanilla, 1=advanced
 
 // Returns 1 if src and dst are in the same island (same SOUT subnet)
 static int mpibIsSameIsland(uint32_t sout_src_ip, uint32_t sout_dst_ip) {
@@ -30,6 +31,25 @@ static int mpibIsSameIsland(uint32_t sout_src_ip, uint32_t sout_dst_ip) {
   uint32_t mask =
       (prefixLen == 32) ? UINT32_MAX : ~((1u << (32 - prefixLen)) - 1);
   return (sout_src_ip & mask) == (sout_dst_ip & mask);
+}
+
+// Extract IPv4 (host byte order) from a socket address.
+// Supports AF_INET and IPv4-mapped AF_INET6 (::ffff:a.b.c.d).
+static uint32_t mpibSocketAddrToIpv4(const union mpibSocketAddress *sa) {
+  if (sa->sa.sa_family == AF_INET) {
+    return ntohl(sa->sin.sin_addr.s_addr);
+  } else if (sa->sa.sa_family == AF_INET6) {
+    const uint8_t *b = (const uint8_t *)&sa->sin6.sin6_addr;
+    // Check for IPv4-mapped: first 10 bytes 0, then ff ff
+    for (int i = 0; i < 10; i++)
+      if (b[i] != 0)
+        return 0;
+    if (b[10] != 0xff || b[11] != 0xff)
+      return 0;
+    return ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+           ((uint32_t)b[14] << 8) | (uint32_t)b[15];
+  }
+  return 0;
 }
 
 /* Agent registration conn_id counter (thread-safe) */
@@ -431,9 +451,28 @@ ib_recv_dev_list:
   mergedDev = mpibMergedDevs + dev;
   comm->base.vProps = mergedDev->vProps;
 
-  // Set nqpsSout/nqpsSup from params directly (contiguous layout)
+  // Path classification from TCP socket addresses (available before QP
+  // creation). Both sides independently compute the same result from the same
+  // inputs (socket IPs + MPIB_MODE env), so metadata QP counts will agree.
+  {
+    uint32_t local_ip = mpibSocketAddrToIpv4(&mpibIfAddr);
+    uint32_t remote_ip = mpibSocketAddrToIpv4(&handle->connectAddr);
+    int sameIsland = mpibIsSameIsland(local_ip, remote_ip);
+    comm->base.pathClass =
+        sameIsland ? MPIB_PATH_INTRA_ISLAND : MPIB_PATH_INTER_ISLAND;
+    comm->base.mode = (int32_t)mpibParamMode();
+  }
+
+  // Set nqpsSout/nqpsSup from params; suppress SUP for vanilla inter-island
   comm->base.nqpsSout = (uint32_t)mpibParamSoutQp();
   comm->base.nqpsSup = (uint32_t)mpibParamSupQp();
+  if (comm->base.mode == 0 && comm->base.pathClass == MPIB_PATH_INTER_ISLAND) {
+    INFO(NCCL_NET,
+         "NET/MPIB : Inter-island vanilla: suppressing SUP QPs "
+         "(nqpsSup %u -> 0)",
+         comm->base.nqpsSup);
+    comm->base.nqpsSup = 0;
+  }
   comm->base.nqps = comm->base.nqpsSout + comm->base.nqpsSup;
 
   // Init PD, Ctx for each IB device
@@ -669,15 +708,13 @@ ib_send_ready:
            sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
     }
 
-    /* Classify connection path based on SOUT subnet */
-    int sameIsland = mpibIsSameIsland(sout_src_ip, sout_dst_ip);
-    comm->base.pathSupBw = sameIsland ? UINT32_MAX : 0;
-    comm->base.hintActive = sameIsland ? 1 : 0;
     INFO(NCCL_NET,
-         "NET/MPIB : Path classification: %s hintActive=%d "
+         "NET/MPIB : pathClass=%s mode=%d nqps=%u (sout=%u sup=%u) "
          "(sout_src=0x%08x sout_dst=0x%08x)",
-         sameIsland ? "SUP (intra-island)" : "SOUT (inter-island)",
-         comm->base.hintActive, sout_src_ip, sout_dst_ip);
+         comm->base.pathClass == MPIB_PATH_INTRA_ISLAND ? "INTRA_ISLAND"
+                                                        : "INTER_ISLAND",
+         comm->base.mode, comm->base.nqps, comm->base.nqpsSout,
+         comm->base.nqpsSup, sout_src_ip, sout_dst_ip);
 
     ncclResult_t regRet =
         mpibAgentRegister(comm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,
@@ -853,9 +890,28 @@ ib_recv_dev_list:
   memcpy(stage->buffer, &rComm->base.vProps, sizeof(ncclNetVDeviceProps_t));
   rComm->base.isSend = false;
 
-  // Set nqpsSout/nqpsSup from params directly (contiguous layout)
+  // Path classification from TCP socket addresses (available before QP
+  // creation)
+  {
+    uint32_t local_ip = mpibSocketAddrToIpv4(&mpibIfAddr);
+    uint32_t remote_ip = mpibSocketAddrToIpv4(&rComm->base.sock.addr);
+    int sameIsland = mpibIsSameIsland(local_ip, remote_ip);
+    rComm->base.pathClass =
+        sameIsland ? MPIB_PATH_INTRA_ISLAND : MPIB_PATH_INTER_ISLAND;
+    rComm->base.mode = (int32_t)mpibParamMode();
+  }
+
+  // Set nqpsSout/nqpsSup from params; suppress SUP for vanilla inter-island
   rComm->base.nqpsSout = (uint32_t)mpibParamSoutQp();
   rComm->base.nqpsSup = (uint32_t)mpibParamSupQp();
+  if (rComm->base.mode == 0 &&
+      rComm->base.pathClass == MPIB_PATH_INTER_ISLAND) {
+    INFO(NCCL_NET,
+         "NET/MPIB : Inter-island vanilla: suppressing SUP QPs "
+         "(nqpsSup %u -> 0)",
+         rComm->base.nqpsSup);
+    rComm->base.nqpsSup = 0;
+  }
   rComm->base.nqps = rComm->base.nqpsSout + rComm->base.nqpsSup;
 
   stage->offset = 0;
@@ -1046,15 +1102,13 @@ ib_recv_ready:
            sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
     }
 
-    /* Classify connection path based on SOUT subnet */
-    int sameIsland = mpibIsSameIsland(sout_src_ip, sout_dst_ip);
-    rComm->base.pathSupBw = sameIsland ? UINT32_MAX : 0;
-    rComm->base.hintActive = sameIsland ? 1 : 0;
     INFO(NCCL_NET,
-         "NET/MPIB : Path classification: %s hintActive=%d "
+         "NET/MPIB : pathClass=%s mode=%d nqps=%u (sout=%u sup=%u) "
          "(sout_src=0x%08x sout_dst=0x%08x)",
-         sameIsland ? "SUP (intra-island)" : "SOUT (inter-island)",
-         rComm->base.hintActive, sout_src_ip, sout_dst_ip);
+         rComm->base.pathClass == MPIB_PATH_INTRA_ISLAND ? "INTRA_ISLAND"
+                                                         : "INTER_ISLAND",
+         rComm->base.mode, rComm->base.nqps, rComm->base.nqpsSout,
+         rComm->base.nqpsSup, sout_src_ip, sout_dst_ip);
 
     ncclResult_t regRet =
         mpibAgentRegister(rComm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,

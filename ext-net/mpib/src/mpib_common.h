@@ -149,6 +149,11 @@ struct mpibProfilerInfo {
 #define MPIB_NET_IB_REQ_GIN_IPUT 4
 extern const char *mpibReqTypeStr[];
 
+typedef enum {
+  MPIB_PATH_INTRA_ISLAND = 0, // Same SOUT subnet → SUP path
+  MPIB_PATH_INTER_ISLAND = 1, // Different SOUT subnet → SOUT path
+} mpibPathClass;
+
 struct mpibRequest {
   struct mpibNetCommBase *base;
   int type;
@@ -246,9 +251,10 @@ struct alignas(32) mpibNetCommBase {
   struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
   // SRQ: slot→request map for recv comms (used by completion handler)
   struct mpibRequest *slotReq[NET_IB_MAX_REQUESTS];
-  // Path classification (computed once at connect/accept)
-  uint32_t pathSupBw; // Fallback sup_bw: 0=SOUT-only, UINT32_MAX=SUP-only
-  int hintActive;     // 1 = read agent hint at runtime, 0 = use pathSupBw
+  // Topology classification (computed once at connect/accept)
+  mpibPathClass pathClass;
+  // Cached MPIB_MODE (0=vanilla, 1=advanced), set once at connect/accept
+  int32_t mode;
 };
 
 struct mpibSendComm {
@@ -357,8 +363,9 @@ mpibCommBaseGetQpForRequest(struct mpibNetCommBase *baseComm, const uint32_t id,
     *outQpIndex = baseComm->nqpsSout +
                   ((baseComm->nqpsSup > 0) ? (id % baseComm->nqpsSup) : 0);
   }
+  // QP might be NULL if the device has no QPs (e.g. SUP suppressed for
+  // inter-island in vanilla mode)
   *outQp = &(baseComm->qps[*outQpIndex]);
-  assert(*outQp != NULL);
   return ncclSuccess;
 }
 

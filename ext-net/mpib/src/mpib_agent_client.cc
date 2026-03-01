@@ -7,6 +7,7 @@
  */
 
 #include "mpib_agent_client.h"
+#include "mpib_common.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -249,6 +250,26 @@ ncclResult_t mpibAgentDeregister(uint32_t conn_id) {
  * ============================================================================
  */
 
-uint32_t mpibAgentReadHint(uint32_t hint_slot) {
-  return mpib_hint_read(&g_mpib_hint_shm->entries[hint_slot]);
+/*
+ * Read raw hint from SHM (internal helper, not exported).
+ * Wraps the seqlock read. Only called in advanced mode.
+ */
+static uint32_t mpibReadHintRaw(uint32_t hint_slot) {
+  return mpib_hint_read_raw(&g_mpib_hint_shm->entries[hint_slot]);
+}
+
+uint32_t mpibGetSupBw(struct mpibSendComm *comm, size_t size) {
+  const int mode = comm->base.mode; // cached at connect time
+  const mpibPathClass pc = comm->base.pathClass;
+  (void)size; // Future: BDP threshold gating
+
+  if (mode == 0) {
+    // Vanilla mode: strict path isolation, no SHM read.
+    return (pc == MPIB_PATH_INTRA_ISLAND) ? UINT32_MAX // SUP only
+                                          : 0;         // SOUT only
+  }
+
+  // Advanced mode: read agent hint from SHM.
+  // (Future: gate on `size > BDP_threshold` for inter-island relay.)
+  return mpibReadHintRaw(comm->hint_slot);
 }

@@ -12,7 +12,11 @@
 #define MPIB_AGENT_CLIENT_H_
 
 #include "mpib_compat.h"
+#include <stddef.h>
 #include <stdint.h>
+
+/* Forward declaration for mpibGetSupBw */
+struct mpibSendComm;
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,7 +25,7 @@ extern "C" {
 /*
  * Initialize agent client: open and mmap the hint shared memory.
  *
- * Must be called before any mpibAgentRegister/mpibAgentReadHint calls.
+ * Must be called before any mpibAgentRegister/mpibGetSupBw calls.
  * Returns ncclSystemError if agent is not running (SHM doesn't exist).
  */
 ncclResult_t mpibAgentClientInit(void);
@@ -60,18 +64,19 @@ ncclResult_t mpibAgentRegister(uint32_t conn_id, uint32_t sout_src_ip,
 ncclResult_t mpibAgentDeregister(uint32_t conn_id);
 
 /*
- * Read the SUP bandwidth hint for a given slot.
+ * Determine SUP bandwidth share for a single transfer.
  *
- * Uses seqlock pattern for consistency.
+ * Encapsulates the full policy decision:
+ *   - In vanilla mode (MPIB_MODE=0): returns pure topology-driven value
+ *     (UINT32_MAX for intra-island, 0 for inter-island). No SHM read.
+ *   - In advanced mode (MPIB_MODE=1): reads agent hint from SHM via seqlock.
  *
- * @param hint_slot  Slot index from registration
+ * @param comm  Send communicator (carries pathClass and hint_slot)
+ * @param size  Transfer size in bytes (for future BDP threshold)
  *
- * Returns an unsigned multiplier of SOUT bandwidth.
- *   - 0 => all SOUT
- *   - 1 => equal split (SUP = SOUT)
- *   - 2 => SUP gets 2x SOUT bandwidth share (SUP ratio = 2/3)
+ * Returns parts-per-1024 value, or sentinel (0 / UINT32_MAX).
  */
-uint32_t mpibAgentReadHint(uint32_t hint_slot);
+uint32_t mpibGetSupBw(struct mpibSendComm *comm, size_t size);
 
 /*
  * Check if agent client is initialized.

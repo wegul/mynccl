@@ -53,9 +53,18 @@ struct alignas(16) mpib_hint_header {
 /*
  * Hint entry for a single flow (identified by SOUT src/dst IP pair).
  *
- * - sup_bw: Unsigned scale factor of SOUT bandwidth.
- *   Interpreted as: sup_bw * sout_bw.
- *   Plugin computes: sup_ratio = sup_bw / (1 + sup_bw)
+ * - sup_bw: SUP traffic share, parts-per-1024.
+ *   Valid range: [0, 1024].
+ *     0    → 100% SOUT (no SUP traffic)
+ *     512  → 50/50 split
+ *     1024 → 100% SUP (no SOUT traffic)
+ *   Sentinel: UINT32_MAX → 100% SUP (used by plugin internally;
+ *             agent should write 1024 instead).
+ *   Plugin computes: sup_ratio = mpibComputeSupRatio(sup_bw)
+ *
+ *   AGENT TODO: Change all writes from the old multiplier encoding
+ *   to parts-per-1024. For example, old value "1" (meaning equal BW)
+ *   becomes "512". Old value "0" stays "0".
  *
  * - seq: Sequence number for seqlock-style consistency.
  *   Agent: increment to odd before write, even after write.
@@ -65,7 +74,7 @@ struct alignas(16) mpib_hint_header {
  *   All connections with same src-dst share this entry.
  */
 struct mpib_hint_entry {
-  uint32_t sup_bw; /* SUP bandwidth multiplier of SOUT */
+  uint32_t sup_bw; /* SUP share, parts-per-1024 [0..1024] */
   uint32_t seq;    /* Sequence number for consistency */
   uint32_t src_ip; /* SOUT source IP (network byte order) */
   uint32_t dst_ip; /* SOUT destination IP (network byte order) */
@@ -87,7 +96,7 @@ struct mpib_hint_shm {
  *   - Retries if write is in progress (seq odd) or seq changed during read
  */
 static inline uint32_t
-mpib_hint_read(const volatile struct mpib_hint_entry *entry) {
+mpib_hint_read_raw(const volatile struct mpib_hint_entry *entry) {
   uint32_t seq1 = 0, seq2 = 0;
   uint32_t bw = 0;
   do {
@@ -106,6 +115,17 @@ mpib_hint_read(const volatile struct mpib_hint_entry *entry) {
 /* ============================================================================
  * Hint Write Helper (Agent Side)
  * ============================================================================
+ *
+ * Write a hint value to SHM.
+ *
+ * sup_bw is parts-per-1024:
+ *   0    → SOUT only
+ *   512  → 50/50
+ *   1024 → SUP only
+ *
+ * AGENT TODO: If old agent wrote "1" to mean "equal BW", now write 512.
+ *             If old agent wrote "0" to mean "SOUT only", still write 0.
+ *             Values > 1024 are reserved (plugin clamps to 1.0).
  */
 static inline void mpib_hint_write(volatile struct mpib_hint_entry *entry,
                                    uint32_t sup_bw) {

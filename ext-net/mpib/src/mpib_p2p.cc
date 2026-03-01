@@ -8,6 +8,21 @@
 
 const char *mpibReqTypeStr[] = {"Unused", "Send", "Recv", "Flush", "IPut"};
 
+/*
+ * Compute SUP byte count from raw sup_bw (parts-per-1024 or sentinel).
+ * Pure integer arithmetic — no floats on the hot path.
+ *   sup_bw == 0          → 0          (SOUT-only)
+ *   sup_bw >= 1024       → reqSize    (SUP-only, includes UINT32_MAX sentinel)
+ *   otherwise            → reqSize * sup_bw >> 10
+ */
+static inline size_t mpibComputeSupBytes(uint32_t sup_bw, size_t reqSize) {
+  if (sup_bw == 0)
+    return 0;
+  if (sup_bw >= 1024)
+    return reqSize;
+  return (size_t)(((uint64_t)reqSize * sup_bw) >> 10);
+}
+
 // ===========================================================================
 // SRQ refill helper
 // Posts generic receive WRs to the SRQ when below low water mark.
@@ -175,22 +190,17 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       size_t sizeSout[MPIB_NET_IB_MAX_RECVS];
       size_t sizeSup[MPIB_NET_IB_MAX_RECVS];
 
-      // Read hint from agent (SUP-eligible) or use cached classification
-      // (SOUT-only)
-      const uint32_t sup_bw = comm->base.hintActive
-                                  ? mpibAgentReadHint(comm->hint_slot)
-                                  : comm->base.pathSupBw;
-      const float sup_ratio =
-          (sup_bw == 0) ? 0.0f : ((float)sup_bw / (1.0f + (float)sup_bw));
+      // Read hint from agent (advanced) or use topology (vanilla)
+      const uint32_t sup_bw = mpibGetSupBw(comm, size);
 
       for (uint32_t i = 0; i < nreqs; i++) {
         const size_t reqSize = reqs[i]->send.size;
-        size_t sup_raw = (size_t)(reqSize * sup_ratio);
-        size_t sup = (sup_raw / align) * align;
+        size_t sup = mpibComputeSupBytes(sup_bw, reqSize);
+        sup = (sup / align) * align; // round down to 128B boundary
         if (sup > reqSize)
           sup = reqSize;
         sizeSup[i] = sup;
-        sizeSout[i] = reqSize - sizeSup[i];
+        sizeSout[i] = reqSize - sup;
       }
 
       // Compute active_mask: OR of rails that have > 0 bytes across all
@@ -260,6 +270,11 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
         uint32_t qpIdx;
         NCCLCHECK(mpibCommBaseGetQpForRequest(&comm->base, comm->base.fifoHead,
                                               i, &qpPtr, &qpIdx));
+        // Skip devices with no QPs (e.g. SUP suppressed for inter-island in
+        // vanilla mode)
+        if (qpPtr->qp == NULL)
+          continue;
+
         const int devIndex = qpPtr->devIndex; // 0 = SOUT, 1 = SUP
         const uint8_t devBit = (uint8_t)(1 << devIndex);
 

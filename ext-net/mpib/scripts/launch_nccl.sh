@@ -7,7 +7,7 @@ MPIB_SO=${MPIB_SO:-"${MPIB_DIR}/libnccl-net-mpib.so"}
 NCCL_TESTS_BIN=${NCCL_TESTS_BIN:-/home/suweigao/benchmark_utils/nccl-tests/build/all_reduce_perf}
 [[ -x "${NCCL_TESTS_BIN}" ]] || { echo "ERROR: NCCL_TESTS_BIN not found/executable: ${NCCL_TESTS_BIN}" >&2; exit 2; }
 
-NP=4
+NP=8
 N_PER_NODE=1
 HOSTS=${HOSTS:-vm1,vm2,vm3,vm4,vm5,vm6,vm7,vm8}
 
@@ -38,6 +38,7 @@ MPIB_HCA_SOUT=${MPIB_HCA_SOUT:-mlx5_0}  # Scaleout NIC
 MPIB_HCA_SUP=${MPIB_HCA_SUP:-mlx5_1}    # Scaleup NIC
 MPIB_OOB_IF=${MPIB_OOB_IF:-enp8s0np0}   # OOB TCP interface (reuse SOUT NIC)
 MPIB_IB_GID_INDEX=${MPIB_IB_GID_INDEX:-3}
+MPIB_MODE=${MPIB_MODE:-0}  # 0=vanilla (strict path isolation), 1=advanced (agent-driven)
 
 UCX_NET_DEVICES=${MPIB_OOB_IF}
 
@@ -56,8 +57,9 @@ MPIRUN_BASE=(
   -x "MPIB_HCA_SUP=${MPIB_HCA_SUP}"
   -x "MPIB_OOB_IF=${MPIB_OOB_IF}"
   -x "MPIB_IB_GID_INDEX=${MPIB_IB_GID_INDEX}"
+  -x "MPIB_MODE=${MPIB_MODE}"
   -x "NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
-  -x "NCCL_IB_HCA=${MPIB_HCA_SUP}"
+  -x "NCCL_IB_HCA=${MPIB_HCA_SOUT}"
   -x "UCX_NET_DEVICES=${UCX_NET_DEVICES}"
   -x "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 )
