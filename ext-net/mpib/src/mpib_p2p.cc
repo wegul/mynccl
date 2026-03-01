@@ -175,8 +175,11 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       size_t sizeSout[MPIB_NET_IB_MAX_RECVS];
       size_t sizeSup[MPIB_NET_IB_MAX_RECVS];
 
-      // Read hint from agent and compute split ratio
-      const uint32_t sup_bw = mpibAgentReadHint(comm->hint_slot);
+      // Read hint from agent (SUP-eligible) or use cached classification
+      // (SOUT-only)
+      const uint32_t sup_bw = comm->base.hintActive
+                                  ? mpibAgentReadHint(comm->hint_slot)
+                                  : comm->base.pathSupBw;
       const float sup_ratio =
           (sup_bw == 0) ? 0.0f : ((float)sup_bw / (1.0f + (float)sup_bw));
 

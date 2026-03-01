@@ -1,0 +1,138 @@
+cluster:
+  name: vm
+  management:
+    local_controller: macbook
+    ssh_config: /Users/suweigao/.ssh/config
+    jump_hosts:
+      island_a: syrax49
+      island_b: taco
+
+  islands:
+    island_a: [vm1, vm2, vm3, vm4]
+    island_b: [vm5, vm6, vm7, vm8]
+
+  nodes:
+    vm1:
+      mgmt_ip: 192.168.122.101
+      jump: syrax49
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.1.1/24   # enp8s0np0 (ToR-A subnet)
+        pf1: 10.9.1.1/24   # enp9s0np1
+
+    vm2:
+      mgmt_ip: 192.168.122.102
+      jump: syrax49
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.1.2/24   # enp8s0np0 (ToR-A subnet)
+        pf1: 10.9.1.2/24   # enp9s0np1
+
+    vm3:
+      mgmt_ip: 192.168.122.103
+      jump: syrax49
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.1.3/24   # enp8s0np0 (ToR-A subnet)
+        pf1: 10.9.1.3/24   # enp9s0np1
+
+    vm4:
+      mgmt_ip: 192.168.122.104
+      jump: syrax49
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.1.4/24   # enp8s0np0 (ToR-A subnet)
+        pf1: 10.9.1.4/24   # enp9s0np1
+
+    vm5:
+      mgmt_ip: 192.168.122.105
+      jump: taco
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.2.5/24   # enp8s0np0 (ToR-B subnet)
+        pf1: 10.9.2.5/24   # enp9s0np1
+
+    vm6:
+      mgmt_ip: 192.168.122.106
+      jump: taco
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.2.6/24   # enp8s0np0 (ToR-B subnet)
+        pf1: 10.9.2.6/24   # enp9s0np1
+
+    vm7:
+      mgmt_ip: 192.168.122.107
+      jump: taco
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.2.7/24   # enp8s0np0 (ToR-B subnet)
+        pf1: 10.9.2.7/24   # enp9s0np1
+
+    vm8:
+      mgmt_ip: 192.168.122.108
+      jump: taco
+      pfs:
+        pf0: {netdev: enp8s0np0, pci: "0000:08:00.0", hca: mlx5_0}
+        pf1: {netdev: enp9s0np1, pci: "0000:09:00.0", hca: mlx5_1}
+      pf_ips:
+        pf0: 10.0.2.8/24   # enp8s0np0 (ToR-B subnet)
+        pf1: 10.9.2.8/24   # enp9s0np1
+
+fat_tree_2tor_1spine:
+  fixed_ports:
+    tor_a_uplink: {front_panel: "25/0", dev_port: 56}
+    spine_from_tor_a: {front_panel: "26/0", dev_port: 64}
+    tor_b_uplink: {front_panel: "27/0", dev_port: 40}
+    spine_from_tor_b: {front_panel: "28/0", dev_port: 48}
+  gateways:
+    tor_a_pf0: 10.0.1.199
+    tor_b_pf0: 10.0.2.199
+
+fat_tree_2tor_2spine:
+  fixed_ports:
+    # Spine-A links (same as 2tor_1spine)
+    tor_a_uplink1:      {front_panel: "25/0", dev_port: 56}
+    spine_a_from_tor_a: {front_panel: "26/0", dev_port: 64}
+    tor_b_uplink1:      {front_panel: "27/0", dev_port: 40}
+    spine_a_from_tor_b: {front_panel: "28/0", dev_port: 48}
+    # Spine-B links (new loopback connections)
+    tor_a_uplink2:      {front_panel: "29/0", dev_port: 24}
+    spine_b_from_tor_a: {front_panel: "30/0", dev_port: 32}
+    tor_b_uplink2:      {front_panel: "31/0", dev_port: 8}
+    spine_b_from_tor_b: {front_panel: "32/0", dev_port: 16}
+  vrfs:
+    tor_a:   101
+    spine_a: 102
+    tor_b:   103
+    spine_b: 104
+  gateways:
+    tor_a_pf0: 10.0.1.199
+    tor_b_pf0: 10.0.2.199
+  ecmp_groups:
+    tor_a_to_remote:
+      members: [tor_a_uplink1, tor_a_uplink2]   # via Spine-A and Spine-B
+      prefix: 10.0.2.0/24
+    tor_b_to_remote:
+      members: [tor_b_uplink1, tor_b_uplink2]   # via Spine-A and Spine-B
+      prefix: 10.0.1.0/24
+
+router_programming:
+  cross_island_pairs:
+    - vm1: [vm5, vm6, vm7, vm8]
+    - vm2: [vm5, vm6, vm7, vm8]
+    - vm3: [vm5, vm6, vm7, vm8]
+    - vm4: [vm5, vm6, vm7, vm8]

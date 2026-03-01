@@ -246,6 +246,9 @@ struct alignas(32) mpibNetCommBase {
   struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
   // SRQ: slot→request map for recv comms (used by completion handler)
   struct mpibRequest *slotReq[NET_IB_MAX_REQUESTS];
+  // Path classification (computed once at connect/accept)
+  uint32_t pathSupBw; // Fallback sup_bw: 0=SOUT-only, UINT32_MAX=SUP-only
+  int hintActive;     // 1 = read agent hint at runtime, 0 = use pathSupBw
 };
 
 struct mpibSendComm {

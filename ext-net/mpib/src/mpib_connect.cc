@@ -1,6 +1,7 @@
 #include "mpib_agent_client.h"
 #include "mpib_common.h"
 #include <algorithm>
+#include <cstdint>
 #include <limits.h>
 
 static uint32_t mpibGidToIpv4(const union ibv_gid *gid, int *isV4);
@@ -16,6 +17,20 @@ MPIB_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 MPIB_PARAM(IbEceEnable, "IB_ECE_ENABLE", 1);
 MPIB_PARAM(SoutQp, "SOUT_QP", 2);
 MPIB_PARAM(SupQp, "SUP_QP", 4);
+MPIB_PARAM(IslandPrefixLen, "ISLAND_PREFIX_LEN", 24);
+
+// Returns 1 if src and dst are in the same island (same SOUT subnet)
+static int mpibIsSameIsland(uint32_t sout_src_ip, uint32_t sout_dst_ip) {
+  int prefixLen = (int)mpibParamIslandPrefixLen();
+  if (prefixLen <= 0 || prefixLen > 32) {
+    prefixLen = 24;
+    WARN("NET/MPIB : Invalid ISLAND_PREFIX_LEN=%d, using default 24",
+         prefixLen);
+  }
+  uint32_t mask =
+      (prefixLen == 32) ? UINT32_MAX : ~((1u << (32 - prefixLen)) - 1);
+  return (sout_src_ip & mask) == (sout_dst_ip & mask);
+}
 
 /* Agent registration conn_id counter (thread-safe) */
 static std::atomic<uint16_t> g_mpib_conn_counter{0};
@@ -654,6 +669,16 @@ ib_send_ready:
            sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
     }
 
+    /* Classify connection path based on SOUT subnet */
+    int sameIsland = mpibIsSameIsland(sout_src_ip, sout_dst_ip);
+    comm->base.pathSupBw = sameIsland ? UINT32_MAX : 0;
+    comm->base.hintActive = sameIsland ? 1 : 0;
+    INFO(NCCL_NET,
+         "NET/MPIB : Path classification: %s hintActive=%d "
+         "(sout_src=0x%08x sout_dst=0x%08x)",
+         sameIsland ? "SUP (intra-island)" : "SOUT (inter-island)",
+         comm->base.hintActive, sout_src_ip, sout_dst_ip);
+
     ncclResult_t regRet =
         mpibAgentRegister(comm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,
                           sup_dst_ip, &comm->hint_slot);
@@ -1020,6 +1045,16 @@ ib_recv_ready:
            "sout_src_v4=%d sout_dst_v4=%d sup_src_v4=%d sup_dst_v4=%d",
            sout_src_is_v4, sout_dst_is_v4, sup_src_is_v4, sup_dst_is_v4);
     }
+
+    /* Classify connection path based on SOUT subnet */
+    int sameIsland = mpibIsSameIsland(sout_src_ip, sout_dst_ip);
+    rComm->base.pathSupBw = sameIsland ? UINT32_MAX : 0;
+    rComm->base.hintActive = sameIsland ? 1 : 0;
+    INFO(NCCL_NET,
+         "NET/MPIB : Path classification: %s hintActive=%d "
+         "(sout_src=0x%08x sout_dst=0x%08x)",
+         sameIsland ? "SUP (intra-island)" : "SOUT (inter-island)",
+         rComm->base.hintActive, sout_src_ip, sout_dst_ip);
 
     ncclResult_t regRet =
         mpibAgentRegister(rComm->conn_id, sout_src_ip, sout_dst_ip, sup_src_ip,
