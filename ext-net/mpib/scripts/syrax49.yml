@@ -1,0 +1,244 @@
+# Bare-metal GPU<->NIC source-of-truth mapping for syrax49
+# Derived from preflight discovery (nvidia-smi topo, sysfs PCI mapping, rdma link).
+# This file is consumed by:
+# - gpu_nic_discovery (consistency checks)
+# - gpu_nic_prepare (.link + namespace preparation)
+
+baremetal_namespace_range:
+  start: 1
+  end: 4
+
+namespace_networks:
+  - namespace: ns1
+    cpu_set: "0-15,64-79"
+    interfaces:
+      - name: ns1pf0
+        address: 10.0.1.1/24
+      - name: ns1pf1
+        address: 10.9.1.1/24
+    routes:
+      - to: 10.9.1.0/24
+        dev: ns1pf1
+      - to: 10.9.1.2/32
+        via: 10.9.1.199
+        dev: ns1pf1
+      - to: 10.9.1.3/32
+        via: 10.9.1.199
+        dev: ns1pf1
+      - to: 10.9.1.4/32
+        via: 10.9.1.199
+        dev: ns1pf1
+      - to: 10.0.1.0/24
+        dev: ns1pf0
+      - to: 10.0.1.2/32
+        via: 10.0.1.199
+        dev: ns1pf0
+      - to: 10.0.1.3/32
+        via: 10.0.1.199
+        dev: ns1pf0
+      - to: 10.0.1.4/32
+        via: 10.0.1.199
+        dev: ns1pf0
+      - to: 10.0.2.0/24
+        via: 10.0.1.199
+        dev: ns1pf0
+  - namespace: ns2
+    cpu_set: "0,16-31,80-95"
+    interfaces:
+      - name: ns2pf0
+        address: 10.0.1.2/24
+      - name: ns2pf1
+        address: 10.9.1.2/24
+    routes:
+      - to: 10.9.1.0/24
+        dev: ns2pf1
+      - to: 10.9.1.1/32
+        via: 10.9.1.199
+        dev: ns2pf1
+      - to: 10.9.1.3/32
+        via: 10.9.1.199
+        dev: ns2pf1
+      - to: 10.9.1.4/32
+        via: 10.9.1.199
+        dev: ns2pf1
+      - to: 10.0.1.0/24
+        dev: ns2pf0
+      - to: 10.0.1.1/32
+        via: 10.0.1.199
+        dev: ns2pf0
+      - to: 10.0.1.3/32
+        via: 10.0.1.199
+        dev: ns2pf0
+      - to: 10.0.1.4/32
+        via: 10.0.1.199
+        dev: ns2pf0
+      - to: 10.0.2.0/24
+        via: 10.0.1.199
+        dev: ns2pf0
+  - namespace: ns3
+    cpu_set: "0,32-47,96-111"
+    interfaces:
+      - name: ns3pf0
+        address: 10.0.1.3/24
+      - name: ns3pf1
+        address: 10.9.1.3/24
+    routes:
+      - to: 10.9.1.0/24
+        dev: ns3pf1
+      - to: 10.9.1.1/32
+        via: 10.9.1.199
+        dev: ns3pf1
+      - to: 10.9.1.2/32
+        via: 10.9.1.199
+        dev: ns3pf1
+      - to: 10.9.1.4/32
+        via: 10.9.1.199
+        dev: ns3pf1
+      - to: 10.0.1.0/24
+        dev: ns3pf0
+      - to: 10.0.1.1/32
+        via: 10.0.1.199
+        dev: ns3pf0
+      - to: 10.0.1.2/32
+        via: 10.0.1.199
+        dev: ns3pf0
+      - to: 10.0.1.4/32
+        via: 10.0.1.199
+        dev: ns3pf0
+      - to: 10.0.2.0/24
+        via: 10.0.1.199
+        dev: ns3pf0
+  - namespace: ns4
+    cpu_set: "0,48-63,112-127"
+    interfaces:
+      - name: ns4pf0
+        address: 10.0.1.4/24
+      - name: ns4pf1
+        address: 10.9.1.4/24
+    routes:
+      - to: 10.9.1.0/24
+        dev: ns4pf1
+      - to: 10.9.1.1/32
+        via: 10.9.1.199
+        dev: ns4pf1
+      - to: 10.9.1.2/32
+        via: 10.9.1.199
+        dev: ns4pf1
+      - to: 10.9.1.3/32
+        via: 10.9.1.199
+        dev: ns4pf1
+      - to: 10.0.1.0/24
+        dev: ns4pf0
+      - to: 10.0.1.1/32
+        via: 10.0.1.199
+        dev: ns4pf0
+      - to: 10.0.1.2/32
+        via: 10.0.1.199
+        dev: ns4pf0
+      - to: 10.0.1.3/32
+        via: 10.0.1.199
+        dev: ns4pf0
+      - to: 10.0.2.0/24
+        via: 10.0.1.199
+        dev: ns4pf0
+
+gpu_nic_groups:
+  - group_id: 1
+    namespace: ns1
+    gpu_index: 0
+    gpu_pci: "0000:d8:00.0"
+    nic_pci: "0000:d6:00"
+    numa_node: 0
+    cpu_set: "0-15,64-79"
+    pf0_current: "ns1pf0"
+    pf1_current: "ns1pf1"
+    pf0_target: "ns1pf0"
+    pf1_target: "ns1pf1"
+    pf0_match:
+      id_path: "pci-0000:d6:00.0"
+      mac: "e8:9e:49:7e:83:0e"
+    pf1_match:
+      id_path: "pci-0000:d6:00.1"
+      mac: "e8:9e:49:7e:83:0f"
+    rdma_expected:
+      - netdev: "ns1pf0"
+        rdma_device: "mlx5_2"
+        rdma_port: 1
+      - netdev: "ns1pf1"
+        rdma_device: "mlx5_3"
+        rdma_port: 1
+
+  - group_id: 2
+    namespace: ns2
+    gpu_index: 0
+    gpu_pci: "0000:b0:00.0"
+    nic_pci: "0000:ae:00"
+    numa_node: 0
+    cpu_set: "0,16-31,80-95"
+    pf0_current: "ns2pf0"
+    pf1_current: "ns2pf1"
+    pf0_target: "ns2pf0"
+    pf1_target: "ns2pf1"
+    pf0_match:
+      id_path: "pci-0000:ae:00.0"
+      mac: "e8:9e:49:7e:83:ae"
+    pf1_match:
+      id_path: "pci-0000:ae:00.1"
+      mac: "e8:9e:49:7e:83:af"
+    rdma_expected:
+      - netdev: "ns2pf0"
+        rdma_device: "mlx5_0"
+        rdma_port: 1
+      - netdev: "ns2pf1"
+        rdma_device: "mlx5_1"
+        rdma_port: 1
+
+  - group_id: 3
+    namespace: ns3
+    gpu_index: 0
+    gpu_pci: "0001:d8:00.0"
+    nic_pci: "0001:d6:00"
+    numa_node: 1
+    cpu_set: "0,32-47,96-111"
+    pf0_current: "ns3pf0"
+    pf1_current: "ns3pf1"
+    pf0_target: "ns3pf0"
+    pf1_target: "ns3pf1"
+    pf0_match:
+      id_path: "pci-0001:d6:00.0"
+      mac: "e8:9e:49:59:19:78"
+    pf1_match:
+      id_path: "pci-0001:d6:00.1"
+      mac: "e8:9e:49:59:19:79"
+    rdma_expected:
+      - netdev: "ns3pf0"
+        rdma_device: "mlx5_6"
+        rdma_port: 1
+      - netdev: "ns3pf1"
+        rdma_device: "mlx5_7"
+        rdma_port: 1
+
+  - group_id: 4
+    namespace: ns4
+    gpu_index: 0
+    gpu_pci: "0001:b0:00.0"
+    nic_pci: "0001:ae:00"
+    numa_node: 1
+    cpu_set: "0,48-63,112-127"
+    pf0_current: "ns4pf0"
+    pf1_current: "ns4pf1"
+    pf0_target: "ns4pf0"
+    pf1_target: "ns4pf1"
+    pf0_match:
+      id_path: "pci-0001:ae:00.0"
+      mac: "e8:9e:49:59:0d:18"
+    pf1_match:
+      id_path: "pci-0001:ae:00.1"
+      mac: "e8:9e:49:59:0d:19"
+    rdma_expected:
+      - netdev: "ns4pf0"
+        rdma_device: "mlx5_4"
+        rdma_port: 1
+      - netdev: "ns4pf1"
+        rdma_device: "mlx5_5"
+        rdma_port: 1

@@ -1,0 +1,221 @@
+[syrax-49:709314] SET LD_LIBRARY_PATH=/home/suweigao/mynccl/ext-net/mpib:/home/suweigao/mynccl/build/lib:
+[syrax-49:709314] SET NCCL_DEBUG=INFO
+[syrax-49:709314] SET NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH
+[syrax-49:709314] SET MPIB_HCA_SOUT=mlx5_0
+[syrax-49:709314] SET MPIB_HCA_SUP=mlx5_1
+[syrax-49:709314] SET MPIB_OOB_IF=ens28f0np0
+[syrax-49:709314] SET MPIB_IB_GID_INDEX=3
+[syrax-49:709314] SET MPIB_MODE=0
+[syrax-49:709314] SET NCCL_IB_HCA=mlx5_0
+[syrax-49:709314] SET UCX_NET_DEVICES=ens28f0np0
+[syrax-49:709314] SET NCCL_NET_GDR_LEVEL=SYS
+# nccl-tests version 2.17.9 nccl-headers=22902 nccl-library=22902
+# Collective test starting: all_reduce_perf
+# nThread 1 nGpus 1 minBytes 8 maxBytes 1073741824 step: 2(factor) warmup iters: 1 iters: 20 agg iters: 1 validation: 1 graph: 0
+#
+# Using devices
+#  Rank  0 Group  0 Pid 709427 on   syrax-49 device  0 [0000:b0:00] NVIDIA RTX PRO 6000 Blackwell Server Edition
+#  Rank  1 Group  0 Pid 1605079 on  eat-tacos device  0 [0000:b2:00] NVIDIA RTX PRO 6000 Blackwell Server Edition
+syrax-49:709427:709427 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+syrax-49:709427:709427 [0] NCCL INFO cudaDriverVersion 13000
+syrax-49:709427:709427 [0] NCCL INFO NCCL version 2.29.2+cuda13.1
+syrax-49:709427:709427 [0] NCCL INFO NCCL git version master 3266b26
+eat-tacos:1605079:1605079 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+eat-tacos:1605079:1605079 [0] NCCL INFO cudaDriverVersion 13000
+eat-tacos:1605079:1605079 [0] NCCL INFO NCCL version 2.29.2+cuda13.1
+eat-tacos:1605079:1605079 [0] NCCL INFO NCCL git version master 3266b26
+syrax-49:709427:709427 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+syrax-49:709427:709427 [0] NCCL INFO NCCL_IB_HCA set to mlx5_0
+syrax-49:709427:709427 [0] NCCL INFO NET/IB: [0] mlx5_0:uverbs0:1/RoCE provider=Mlx5 speed=200000 context=0x5b595e393e20 pciPath=/sys/devices/pci0000:ab/0000:ab:02.0/0000:ac:00.0/0000:ad:00.0/0000:ae:00.0 ar=0
+syrax-49:709427:709427 [0] NCCL INFO NET/IB : Made virtual device [0] name=mlx5_0 speed=200000 ndevs=1
+syrax-49:709427:709427 [0] NCCL INFO NET/IB : Using [0]mlx5_0:1/RoCE [RO]; OOB ens28f0np0:10.93.226.199<0>
+syrax-49:709427:709427 [0] NCCL INFO Initialized NET plugin IB
+syrax-49:709427:709427 [0] NCCL INFO Assigned NET plugin IB to comm
+syrax-49:709427:709427 [0] NCCL INFO Assigned GIN plugin GIN_IB_GDAKI to comm
+syrax-49:709427:709427 [0] NCCL INFO Assigned RMA plugin GIN_IB_PROXY to comm
+syrax-49:709427:709427 [0] NCCL INFO Using network IB
+syrax-49:709427:709427 [0] NCCL INFO DMA-BUF is available on GPU device 0
+syrax-49:709427:709427 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x5b5957d73d70 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId b0000 commId 0xb481a251e1459e1b - Init START
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+eat-tacos:1605079:1605079 [0] NCCL INFO NCCL_IB_HCA set to mlx5_0
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/IB: [0] mlx5_0:uverbs0:1/RoCE provider=Mlx5 speed=200000 context=0x5d134342dc70 pciPath=/sys/devices/pci0000:ad/0000:ad:02.0/0000:ae:00.0/0000:af:00.0/0000:b0:00.0 ar=0
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/IB : Made virtual device [0] name=mlx5_0 speed=200000 ndevs=1
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/IB : Using [0]mlx5_0:1/RoCE [RO]; OOB ens28f0np0:10.93.226.200<0>
+eat-tacos:1605079:1605079 [0] NCCL INFO Initialized NET plugin IB
+eat-tacos:1605079:1605079 [0] NCCL INFO Assigned NET plugin IB to comm
+eat-tacos:1605079:1605079 [0] NCCL INFO Assigned GIN plugin GIN_IB_GDAKI to comm
+eat-tacos:1605079:1605079 [0] NCCL INFO Assigned RMA plugin GIN_IB_PROXY to comm
+eat-tacos:1605079:1605079 [0] NCCL INFO Using network IB
+eat-tacos:1605079:1605079 [0] NCCL INFO DMA-BUF is available on GPU device 0
+eat-tacos:1605079:1605079 [0] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x5d133ce00e50 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId b2000 commId 0xb481a251e1459e1b - Init START
+eat-tacos:1605079:1605079 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+syrax-49:709427:709427 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+syrax-49:709427:709427 [0] NCCL INFO TOPO/NET : Importing network plugins to topology
+syrax-49:709427:709427 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 0 'mlx5_0'
+syrax-49:709427:709427 [0] NCCL INFO ncclTopoPopulateNics : Filled mlx5_0 in topo with pciPath=/sys/devices/pci0000:ab/0000:ab:02.0/0000:ac:00.0/0000:ad:00.0/0000:ae:00.0 keep=1 coll=(null)
+eat-tacos:1605079:1605079 [0] NCCL INFO TOPO/NET : Importing network plugins to topology
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/IB : GPU Direct RDMA Enabled for HCA 0 'mlx5_0'
+eat-tacos:1605079:1605079 [0] NCCL INFO ncclTopoPopulateNics : Filled mlx5_0 in topo with pciPath=/sys/devices/pci0000:ad/0000:ad:02.0/0000:ae:00.0/0000:af:00.0/0000:b0:00.0 keep=1 coll=(null)
+syrax-49:709427:709427 [0] NCCL INFO NCCL_NET_GDR_LEVEL set by environment to SYS
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+syrax-49:709427:709427 [0] NCCL INFO === System : maxBw 25.0 totalBw 48.0 ===
+syrax-49:709427:709427 [0] NCCL INFO CPU/0-0 (1/1/3)
+syrax-49:709427:709427 [0] NCCL INFO + PCI[48.0] - PCI/0-ac000 (1000c0301000100b)
+syrax-49:709427:709427 [0] NCCL INFO               + PCI[48.0] - NIC/0-ae000
+syrax-49:709427:709427 [0] NCCL INFO                             + NET[25.0] - NET/0-0 (0/ae837e0003499ee8/1/25.000000)
+syrax-49:709427:709427 [0] NCCL INFO               + PCI[48.0] - GPU/0-b0000 (0)
+syrax-49:709427:709427 [0] NCCL INFO ==========================================
+syrax-49:709427:709427 [0] NCCL INFO GPU/0-b0000 :GPU/0-b0000 (0/5000.0/LOC) CPU/0-0 (2/48.0/PHB) NET/0-0 (3/25.0/PIX) 
+syrax-49:709427:709427 [0] NCCL INFO NET/0-0 :GPU/0-b0000 (3/25.0/PIX) CPU/0-0 (3/25.0/PHB) NET/0-0 (0/5000.0/LOC) 
+syrax-49:709427:709427 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 0,64. (GPU affinity = 0-31,64-95 ; CPU affinity = 0,64).
+syrax-49:709427:709427 [0] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 24.000000/24.000000, type LOC/PIX, sameChannels 1
+syrax-49:709427:709427 [0] NCCL INFO  0 : NET/0-0 GPU/0-b0000 NET/0-0
+syrax-49:709427:709427 [0] NCCL INFO Pattern 3, crossNic 0, nChannels 1, bw 48.000000/24.000000, type LOC/PIX, sameChannels 1
+syrax-49:709427:709427 [0] NCCL INFO  0 : NET/0-0 GPU/0-b0000 NET/0-0
+eat-tacos:1605079:1605079 [0] NCCL INFO NCCL_NET_GDR_LEVEL set by environment to SYS
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+eat-tacos:1605079:1605079 [0] NCCL INFO === System : maxBw 25.0 totalBw 48.0 ===
+eat-tacos:1605079:1605079 [0] NCCL INFO CPU/0-0 (1/1/3)
+eat-tacos:1605079:1605079 [0] NCCL INFO + PCI[48.0] - PCI/0-ae000 (1000c0301000100b)
+eat-tacos:1605079:1605079 [0] NCCL INFO               + PCI[48.0] - NIC/0-b0000
+eat-tacos:1605079:1605079 [0] NCCL INFO                             + NET[25.0] - NET/0-0 (0/6e837e0003499ee8/1/25.000000)
+eat-tacos:1605079:1605079 [0] NCCL INFO               + PCI[48.0] - GPU/0-b2000 (1)
+eat-tacos:1605079:1605079 [0] NCCL INFO ==========================================
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU/0-b2000 :GPU/0-b2000 (0/5000.0/LOC) CPU/0-0 (2/48.0/PHB) NET/0-0 (3/25.0/PIX) 
+eat-tacos:1605079:1605079 [0] NCCL INFO NET/0-0 :GPU/0-b2000 (3/25.0/PIX) CPU/0-0 (3/25.0/PHB) NET/0-0 (0/5000.0/LOC) 
+eat-tacos:1605079:1605079 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is 0. (GPU affinity = 0-63,128-191 ; CPU affinity = 0).
+eat-tacos:1605079:1605079 [0] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 24.000000/24.000000, type LOC/PIX, sameChannels 1
+eat-tacos:1605079:1605079 [0] NCCL INFO  0 : NET/0-0 GPU/0-b2000 NET/0-0
+eat-tacos:1605079:1605079 [0] NCCL INFO Pattern 3, crossNic 0, nChannels 1, bw 48.000000/24.000000, type LOC/PIX, sameChannels 1
+eat-tacos:1605079:1605079 [0] NCCL INFO  0 : NET/0-0 GPU/0-b2000 NET/0-0
+syrax-49:709427:709427 [0] NCCL INFO comm 0x5b5957d73d70 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+syrax-49:709427:709427 [0] NCCL INFO Tree 0 : -1 -> 0 -> 1/-1/-1
+syrax-49:709427:709427 [0] NCCL INFO Tree 1 : 1 -> 0 -> -1/-1/-1
+syrax-49:709427:709427 [0] NCCL INFO Channel 00/02 : 0 1
+syrax-49:709427:709427 [0] NCCL INFO Channel 01/02 : 0 1
+syrax-49:709427:709427 [0] NCCL INFO Ring 00 : 1 -> 0 -> 1
+syrax-49:709427:709427 [0] NCCL INFO Ring 01 : 1 -> 0 -> 1
+syrax-49:709427:709427 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+syrax-49:709427:709427 [0] NCCL INFO P2P Chunksize set to 131072
+syrax-49:709427:709427 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+syrax-49:709427:709427 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+syrax-49:709427:709443 [0] NCCL INFO [Proxy Service] Device 0 CPU core 0
+syrax-49:709427:709444 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 64
+syrax-49:709427:709427 [0] NCCL INFO ncclP2pSchedule: group size used is 1
+eat-tacos:1605079:1605079 [0] NCCL INFO comm 0x5d133ce00e50 rank 1 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+eat-tacos:1605079:1605079 [0] NCCL INFO Tree 0 : 0 -> 1 -> -1/-1/-1
+eat-tacos:1605079:1605079 [0] NCCL INFO Tree 1 : -1 -> 1 -> 0/-1/-1
+eat-tacos:1605079:1605079 [0] NCCL INFO Ring 00 : 0 -> 1 -> 0
+eat-tacos:1605079:1605079 [0] NCCL INFO Ring 01 : 0 -> 1 -> 0
+eat-tacos:1605079:1605079 [0] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1
+eat-tacos:1605079:1605079 [0] NCCL INFO P2P Chunksize set to 131072
+eat-tacos:1605079:1605079 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+eat-tacos:1605079:1605079 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+eat-tacos:1605079:1605079 [0] NCCL INFO ncclP2pSchedule: group size used is 1
+syrax-49:709427:709427 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+syrax-49:709427:709427 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+syrax-49:709427:709427 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+syrax-49:709427:709427 [0] NCCL INFO CC Off, workFifoBytes 1048576
+syrax-49:709427:709427 [0] NCCL INFO ncclCommInitRankConfig comm 0x5b5957d73d70 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId b0000 commId 0xb481a251e1459e1b - Init COMPLETE
+syrax-49:709427:709427 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.56 (kernels 0.31, alloc 0.10, bootstrap 0.14, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.00)
+eat-tacos:1605079:1605079 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+eat-tacos:1605079:1605079 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+eat-tacos:1605079:1605079 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+eat-tacos:1605079:1605138 [0] NCCL INFO [Proxy Service] Device 0 CPU core 0
+eat-tacos:1605079:1605139 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 0
+eat-tacos:1605079:1605079 [0] NCCL INFO ncclCommInitRankConfig comm 0x5d133ce00e50 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId b2000 commId 0xb481a251e1459e1b - Init COMPLETE
+eat-tacos:1605079:1605079 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.55 (kernels 0.41, alloc 0.12, bootstrap 0.00, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+#
+#                                                              out-of-place                       in-place          
+#       size         count      type   redop    root     time   algbw   busbw  #wrong     time   algbw   busbw  #wrong 
+#        (B)    (elements)                               (us)  (GB/s)  (GB/s)             (us)  (GB/s)  (GB/s)         
+syrax-49:709427:709427 [0] NCCL INFO Symmetric VA size=96GB
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+eat-tacos:1605079:1605079 [0] NCCL INFO Symmetric VA size=96GB
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+syrax-49:709427:709443 [0] NCCL INFO New proxy recv connection 0 from local rank 0, transport 2
+syrax-49:709427:709445 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 64
+syrax-49:709427:709427 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x7787a0000d20
+syrax-49:709427:709427 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0/GDRDMA
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+syrax-49:709427:709443 [0] NCCL INFO New proxy recv connection 1 from local rank 0, transport 2
+syrax-49:709427:709427 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x7787a0000d98
+syrax-49:709427:709427 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0/GDRDMA
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 1, mode Default)
+syrax-49:709427:709443 [0] NCCL INFO New proxy send connection 2 from local rank 0, transport 2
+syrax-49:709427:709427 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x7787a0000e10
+syrax-49:709427:709427 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0/GDRDMA
+syrax-49:709427:709427 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-720896 (rank 0) - NET/0-0 (distance 4 <= 9, read 1, mode Default)
+syrax-49:709427:709443 [0] NCCL INFO New proxy send connection 3 from local rank 0, transport 2
+syrax-49:709427:709427 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x7787a0000e88
+syrax-49:709427:709427 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0/GDRDMA
+eat-tacos:1605079:1605138 [0] NCCL INFO New proxy recv connection 0 from local rank 0, transport 2
+eat-tacos:1605079:1605079 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x72932c000d20
+eat-tacos:1605079:1605144 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 0
+eat-tacos:1605079:1605079 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [receive] via NET/IB/0/GDRDMA
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 0, mode Default)
+eat-tacos:1605079:1605138 [0] NCCL INFO New proxy recv connection 1 from local rank 0, transport 2
+eat-tacos:1605079:1605079 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x72932c000d98
+eat-tacos:1605079:1605079 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [receive] via NET/IB/0/GDRDMA
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 1, mode Default)
+eat-tacos:1605079:1605138 [0] NCCL INFO New proxy send connection 2 from local rank 0, transport 2
+eat-tacos:1605079:1605079 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x72932c000e10
+eat-tacos:1605079:1605079 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [send] via NET/IB/0/GDRDMA
+eat-tacos:1605079:1605079 [0] NCCL INFO GPU Direct RDMA Enabled for GPU/0-729088 (rank 1) - NET/0-0 (distance 4 <= 9, read 1, mode Default)
+eat-tacos:1605079:1605138 [0] NCCL INFO New proxy send connection 3 from local rank 0, transport 2
+eat-tacos:1605079:1605079 [0] NCCL INFO Connected to proxy localRank 0 -> connection 0x72932c000e88
+eat-tacos:1605079:1605079 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [send] via NET/IB/0/GDRDMA
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: NCCL Dev 0 IbDev 0 Port 1 qpn 18121 mtu 5 GID 3 (0/502000AFFFF0000) ctsFifoRkey=0x17fcb9 ctsFifoLkey=0x17fcb9
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18121 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: NCCL Dev 0 IbDev 0 Port 1 qpn 18552 mtu 5 GID 3 (0/201000AFFFF0000) ctsFifoRkey=0x17e19c ctsFifoLkey=0x17e19c
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18552 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18552 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: NCCL Dev 0 IbDev 0 Port 1 qpn 18124 mtu 5 GID 3 (0/502000AFFFF0000) ctsFifoRkey=0x17fbb6 ctsFifoLkey=0x17fbb6
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18124 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18121 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: NCCL Dev 0 IbDev 0 Port 1 qpn 18555 mtu 5 GID 3 (0/201000AFFFF0000) ctsFifoRkey=0x1801bf ctsFifoLkey=0x1801bf
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18555 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+eat-tacos:1605079:1605138 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18124 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+syrax-49:709427:709443 [0] NCCL INFO NET/IB: IbDev 0 Port 1 qpn 18555 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+syrax-49:709427:709427 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+eat-tacos:1605079:1605079 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+           8             2     float     sum      -1    39.85    0.00    0.00       0    37.62    0.00    0.00       0
+          16             4     float     sum      -1    35.15    0.00    0.00       0    34.05    0.00    0.00       0
+          32             8     float     sum      -1    35.30    0.00    0.00       0    35.08    0.00    0.00       0
+          64            16     float     sum      -1    36.46    0.00    0.00       0    34.49    0.00    0.00       0
+         128            32     float     sum      -1    35.16    0.00    0.00       0    34.98    0.00    0.00       0
+         256            64     float     sum      -1    35.85    0.01    0.01       0    36.20    0.01    0.01       0
+         512           128     float     sum      -1    35.34    0.01    0.01       0    46.96    0.01    0.01       0
+        1024           256     float     sum      -1    38.22    0.03    0.03       0    47.32    0.02    0.02       0
+        2048           512     float     sum      -1    38.48    0.05    0.05       0    36.31    0.06    0.06       0
+        4096          1024     float     sum      -1    48.52    0.08    0.08       0    39.04    0.10    0.10       0
+        8192          2048     float     sum      -1    48.92    0.17    0.17       0    47.82    0.17    0.17       0
+       16384          4096     float     sum      -1    52.47    0.31    0.31       0    49.76    0.33    0.33       0
+       32768          8192     float     sum      -1    54.40    0.60    0.60       0    48.21    0.68    0.68       0
+       65536         16384     float     sum      -1    49.09    1.33    1.33       0    60.09    1.09    1.09       0
+      131072         32768     float     sum      -1    71.86    1.82    1.82       0    76.01    1.72    1.72       0
+      262144         65536     float     sum      -1   114.36    2.29    2.29       0   121.18    2.16    2.16       0
+      524288        131072     float     sum      -1    89.85    5.84    5.84       0    88.17    5.95    5.95       0
+     1048576        262144     float     sum      -1   123.85    8.47    8.47       0   122.22    8.58    8.58       0
+     2097152        524288     float     sum      -1   212.03    9.89    9.89       0   206.39   10.16   10.16       0
+     4194304       1048576     float     sum      -1   392.81   10.68   10.68       0   390.10   10.75   10.75       0
+     8388608       2097152     float     sum      -1   573.28   14.63   14.63       0   547.96   15.31   15.31       0
+    16777216       4194304     float     sum      -1  1074.82   15.61   15.61       0  1069.99   15.68   15.68       0
+    33554432       8388608     float     sum      -1  2174.19   15.43   15.43       0  2164.17   15.50   15.50       0
+    67108864      16777216     float     sum      -1  4309.12   15.57   15.57       0  4274.84   15.70   15.70       0
+   134217728      33554432     float     sum      -1  8456.18   15.87   15.87       0  8578.71   15.65   15.65       0
+   268435456      67108864     float     sum      -1  16981.6   15.81   15.81       0  17210.0   15.60   15.60       0
+   536870912     134217728     float     sum      -1  34279.6   15.66   15.66       0  34298.6   15.65   15.65       0
+  1073741824     268435456     float     sum      -1  68030.2   15.78   15.78       0  68066.7   15.77   15.77       0
+syrax-49:709427:709427 [0] NCCL INFO comm 0x5b5957d73d70 rank 0 nranks 2 cudaDev 0 busId b0000 - Destroy COMPLETE
+eat-tacos:1605079:1605079 [0] NCCL INFO comm 0x5d133ce00e50 rank 1 nranks 2 cudaDev 0 busId b2000 - Destroy COMPLETE
+# Out of bounds values : 0 OK
+# Avg bus bandwidth    : 5.93995 
+#
+# Collective test concluded: all_reduce_perf
+#
+
+eat-tacos:1605079:1605079 [0] NCCL INFO ENV/Plugin: Closing env plugin ncclEnvDefault
+syrax-49:709427:709427 [0] NCCL INFO ENV/Plugin: Closing env plugin ncclEnvDefault
