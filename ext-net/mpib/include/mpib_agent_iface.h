@@ -14,9 +14,16 @@
 
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define MPIB_ALIGNAS(x) __attribute__((aligned(x)))
+#else
+#define MPIB_ALIGNAS(x)
 #endif
 
 /* ============================================================================
@@ -24,9 +31,32 @@ extern "C" {
  * ============================================================================
  */
 
-#define MPIB_HINT_DIR "/tmp/mpib"
-#define MPIB_HINT_PATH "/tmp/mpib/hints"
-#define MPIB_SOCK_PATH "/tmp/mpib/agent.sock"
+#define MPIB_AGENT_TAG_ENV "MPIB_AGENT_TAG"
+#define MPIB_HINT_BASE_DIR "/tmp/mpib"
+
+/* Build /tmp/mpib/<tag>/hints into buf. Returns 0 on success, -1 on error. */
+static inline int mpib_build_hint_path(const char *tag, char *buf, size_t len) {
+  if (tag == NULL || tag[0] == '\0' || buf == NULL || len == 0)
+    return -1;
+
+  if (snprintf(buf, len, "%s/%s/hints", MPIB_HINT_BASE_DIR, tag) >= (int)len)
+    return -1;
+
+  return 0;
+}
+
+/* Build /tmp/mpib/<tag>/agent.sock into buf. Returns 0 on success, -1 on error.
+ */
+static inline int mpib_build_sock_path(const char *tag, char *buf, size_t len) {
+  if (tag == NULL || tag[0] == '\0' || buf == NULL || len == 0)
+    return -1;
+
+  if (snprintf(buf, len, "%s/%s/agent.sock", MPIB_HINT_BASE_DIR, tag) >=
+      (int)len)
+    return -1;
+
+  return 0;
+}
 
 /* ============================================================================
  * Hint Shared Memory Format
@@ -45,10 +75,10 @@ extern "C" {
 #define MPIB_HINT_MAGIC 0x4D504948 /* "MPIH" in little-endian */
 #define MPIB_HINT_MAX_ENTRIES 256
 
-struct alignas(16) mpib_hint_header {
+struct mpib_hint_header {
   uint32_t magic;       /* Must be MPIB_HINT_MAGIC */
   uint32_t max_entries; /* Number of entry slots (256) */
-};
+} MPIB_ALIGNAS(16);
 
 /*
  * Hint entry for a single flow (identified by SOUT src/dst IP pair).
