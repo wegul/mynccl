@@ -19,7 +19,8 @@ Env vars:
   NP, N_PER_NODE, HOSTS, NCCL_TESTS_BIN (or BINARY), NCCL_LIB_DIR,
   MPIB_HCA_SOUT, MPIB_HCA_SUP, MPIB_OOB_IF, MPIB_IB_GID_INDEX,
   NCCL_DEBUG, NCCL_DEBUG_SUBSYS, OMPI_OOB_IF_INCLUDE, OMPI_BTL_IF_INCLUDE,
-  GDR_MODE(auto|on|off), MPIRUN_BINDING,
+  GDR_MODE(auto|on|off), CUDA_VISIBLE_DEVICES (default 3 = GPU3, PIX-local to mlx5_6 SOUT),
+  MPIRUN_BINDING (default '--bind-to numa --map-by ppr:1:node'),
   NCCL_IB_QPS_PER_CONNECTION, NCCL_NET_GDR_READ,
   NCCL_MIN_NCHANNELS, NCCL_MAX_NCHANNELS
 EOF
@@ -34,12 +35,17 @@ NCCL_DEBUG=${NCCL_DEBUG:-INFO}
 NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET,GRAPH}
 
 # MPIB dual-rail device selection (all required)
-MPIB_HCA_SOUT=${MPIB_HCA_SOUT:-mlx5_0}  # Scaleout NIC
+MPIB_HCA_SOUT=${MPIB_HCA_SOUT:-mlx5_2}  # Scaleout NIC
 MPIB_HCA_SUP=${MPIB_HCA_SUP:-mlx5_1}    # Scaleup NIC
 MPIB_OOB_IF=${MPIB_OOB_IF:-ens28f0np0}   # OOB TCP interface (reuse SOUT NIC)
 MPIB_IB_GID_INDEX=${MPIB_IB_GID_INDEX:-3}
 MPIB_MODE=${MPIB_MODE:-0}  # 0=vanilla (strict path isolation), 1=advanced (agent-driven)
 GDR_MODE=${GDR_MODE:-auto} # auto|on|off
+
+# GPU selection: GPU3 is PIX-local to mlx5_6 (SOUT) on this host.
+# mlx5_6 → GPU3 (PIX), GPU2 (NODE)  |  mlx5_1 → GPU0 (PIX), GPU1 (NODE)
+# Override if your SOUT NIC or target node topology differs.
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
 # Open MPI TCP control/data interfaces. Keep these aligned with MPIB_OOB_IF
 # so Open MPI does not accept peer connections on unexpected NICs.
@@ -65,6 +71,7 @@ MPIRUN_BASE=(
   -x "MPIB_OOB_IF=${MPIB_OOB_IF}"
   -x "MPIB_IB_GID_INDEX=${MPIB_IB_GID_INDEX}"
   -x "MPIB_MODE=${MPIB_MODE}"
+  -x "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
   -x "NCCL_IB_HCA=${MPIB_HCA_SOUT}"
   -x "UCX_NET_DEVICES=${UCX_NET_DEVICES}"
   # -x "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
@@ -87,9 +94,12 @@ case "${GDR_MODE}" in
     ;;
 esac
 
-# Optional Open MPI binding policy, e.g.:
-#   MPIRUN_BINDING="--bind-to core --map-by ppr:1:node:pe=1"
-#   MPIRUN_BINDING="--bind-to numa --map-by ppr:1:node"
+# CPU binding policy. -N is already translated to ppr:N:node internally by
+# this version of Open MPI, so any explicit --map-by causes a "too many
+# directives" conflict. Only use --bind-to here.
+#   MPIRUN_BINDING="--bind-to core"   # physical cores only (no HT)
+#   MPIRUN_BINDING=""                 # disable binding entirely
+MPIRUN_BINDING=${MPIRUN_BINDING:-"--bind-to numa"}
 if [[ -n "${MPIRUN_BINDING:-}" ]]; then
   # shellcheck disable=SC2206
   _mpirun_binding=( ${MPIRUN_BINDING} )
