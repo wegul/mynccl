@@ -258,7 +258,7 @@ static uint32_t mpibReadHintRaw(uint32_t hint_slot) {
   return mpib_hint_read_raw(&g_mpib_hint_shm->entries[hint_slot]);
 }
 
-uint32_t mpibGetSupBw(struct mpibSendComm *comm, size_t size) {
+uint32_t mpibGetSupBw(struct mpibRecvComm *comm, size_t size) {
   const int mode = comm->base.mode; // cached at connect time
   const mpibPathClass pc = comm->base.pathClass;
   (void)size; // Future: BDP threshold gating

@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 /* Forward declaration for mpibGetSupBw */
-struct mpibSendComm;
+struct mpibRecvComm;
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,12 +71,12 @@ ncclResult_t mpibAgentDeregister(uint32_t conn_id);
  *     (UINT32_MAX for intra-island, 0 for inter-island). No SHM read.
  *   - In advanced mode (MPIB_MODE=1): reads agent hint from SHM via seqlock.
  *
- * @param comm  Send communicator (carries pathClass and hint_slot)
+ * @param comm  Recv communicator (carries pathClass and hint_slot)
  * @param size  Transfer size in bytes (for future BDP threshold)
  *
  * Returns parts-per-1024 value, or sentinel (0 / UINT32_MAX).
  */
-uint32_t mpibGetSupBw(struct mpibSendComm *comm, size_t size);
+uint32_t mpibGetSupBw(struct mpibRecvComm *comm, size_t size);
 
 /*
  * Check if agent client is initialized.

@@ -37,31 +37,6 @@ extern int mpibNMergedIbDevs;
 #define MPIB_MAX_DEVS 2 // MPIB-CUSTOM: Exactly 2 devices (SOUT + SUP)
 #define MPIB_CTS_SIGNAL_INTERVAL 128 // Signal CTS every N slots
 
-// SRQ watermarks (hardcoded per design doc)
-#define MPIB_SRQ_LOW_WATER 64
-#define MPIB_SRQ_HIGH_WATER 512
-
-// IMM data encoding for SRQ-based completion
-// Layout: [7:0] slot_idx, [9:8] active_mask, [31:10] size_q
-#define MPIB_IMM_SLOT_BITS 8
-#define MPIB_IMM_MASK_BITS 2
-#define MPIB_IMM_SIZEQ_BITS 22
-#define MPIB_IMM_SIZE_GRANULARITY 128
-#define MPIB_IMM_SIZEQ_SENTINEL ((1u << MPIB_IMM_SIZEQ_BITS) - 1)
-
-// IMM data pack/unpack helpers
-static inline uint32_t mpibImmEncode(uint8_t slot, uint8_t mask,
-                                     uint32_t size_q) {
-  return ((uint32_t)slot) | ((uint32_t)(mask & 0x3) << 8) |
-         ((size_q & MPIB_IMM_SIZEQ_SENTINEL) << 10);
-}
-static inline void mpibImmDecode(uint32_t imm, uint8_t *slot, uint8_t *mask,
-                                 uint32_t *size_q) {
-  *slot = (uint8_t)(imm & 0xFF);
-  *mask = (uint8_t)((imm >> 8) & 0x3);
-  *size_q = (imm >> 10) & MPIB_IMM_SIZEQ_SENTINEL;
-}
-
 #define MAX_MERGED_DEV_NAME (MAXNAMESIZE * MPIB_MAX_DEVS) + MPIB_MAX_DEVS
 struct alignas(64) mpibMergedDev {
   ncclNetVDeviceProps_t vProps;
@@ -158,17 +133,12 @@ struct mpibRequest {
   struct mpibNetCommBase *base;
   int type;
   struct mpibSocket *sock;
-  int events[MPIB_MAX_DEVS];
-  struct mpibNetCommDevBase *devBases[MPIB_MAX_DEVS];
+  int events[MPIB_MAX_DEVS];                          // pending CQEs per device
+  struct mpibNetCommDevBase *devBases[MPIB_MAX_DEVS]; // CQs to poll
 #ifdef NCCL_ENABLE_NET_PROFILING
   struct mpibProfilerInfo pInfo[MPIB_NET_IB_MAX_RECVS];
 #endif
   uint32_t nreqs;
-  // SRQ-based completion tracking (RECV only)
-  uint8_t slot;          // Slot index (0..255)
-  uint8_t expected_mask; // Active rail mask learned from first IMM (0 = unset)
-  uint8_t seen_mask;     // Rails that have delivered an IMM
-  uint8_t _pad;
   union {
     struct {
       size_t size;
@@ -189,9 +159,6 @@ struct mpibNetCommDevBase {
   int ibDevN;
   struct ibv_pd *pd;
   struct ibv_cq *cq;
-  // SRQ for recv comms (NULL for send comms)
-  struct ibv_srq *srq;
-  int srqPosted; // Number of generic WQEs posted to SRQ
   struct mpibGidInfo gidInfo;
 };
 
@@ -202,6 +169,8 @@ struct alignas(32) mpibSendFifo {
   uint32_t nreqs;
   uint32_t tag;
   uint64_t idx;
+  uint8_t selectedDevIndex; // 0 = SOUT, 1 = SUP (set by receiver)
+  uint8_t selectedQpIndex;  // flat index into base.qps[] (set by receiver)
 };
 
 struct mpibQp {
@@ -241,6 +210,10 @@ struct alignas(32) mpibNetCommBase {
   uint32_t nqps;
   uint32_t nqpsSout; // QP count on SOUT (dev0)
   uint32_t nqpsSup;  // QP count on SUP (dev1)
+  // Weighted round-robin state for rail/QP selection (recv side only)
+  uint32_t qpCursorSout; // round-robin cursor within SOUT QPs
+  uint32_t qpCursorSup;  // round-robin cursor within SUP QPs
+  uint64_t totalCursor;  // monotonic message counter for weighted split
   struct mpibSocket sock;
   int ready;
   int isSend;
@@ -249,8 +222,6 @@ struct alignas(32) mpibNetCommBase {
   struct mpibStats stats;
   ncclNetVDeviceProps_t vProps;
   struct mpibRequest reqs[NET_IB_MAX_REQUESTS];
-  // SRQ: slot→request map for recv comms (used by completion handler)
-  struct mpibRequest *slotReq[NET_IB_MAX_REQUESTS];
   // Topology classification (computed once at connect/accept)
   mpibPathClass pathClass;
   // Cached MPIB_MODE (0=vanilla, 1=advanced), set once at connect/accept
@@ -343,36 +314,12 @@ extern ncclProfilerCallback_t mpibProfilerFunction;
 extern std::thread mpibAsyncThread;
 void *mpibAsyncThreadMain(void *args);
 
-void mpibAddEvent(struct mpibRequest *req, int devIndex);
-
 struct mpibNetCommDevBase *mpibGetNetCommDevBase(struct mpibNetCommBase *base,
                                                  int devIndex);
 
-static inline ncclResult_t
-mpibCommBaseGetQpForRequest(struct mpibNetCommBase *baseComm, const uint32_t id,
-                            const uint8_t devIndex, struct mpibQp **outQp,
-                            uint32_t *outQpIndex) {
-  // devIndex: 0=SOUT, 1=SUP
-  // id: fifoHead counter for round-robin within device
-  // Select one QP from the device's pool using round-robin
-  if (devIndex == 0) {
-    // SOUT: pick from qps[0..nqpsSout-1]
-    *outQpIndex = (baseComm->nqpsSout > 0) ? (id % baseComm->nqpsSout) : 0;
-  } else {
-    // SUP: pick from qps[nqpsSout..nqps-1]
-    *outQpIndex = baseComm->nqpsSout +
-                  ((baseComm->nqpsSup > 0) ? (id % baseComm->nqpsSup) : 0);
-  }
-  // QP might be NULL if the device has no QPs (e.g. SUP suppressed for
-  // inter-island in vanilla mode)
-  *outQp = &(baseComm->qps[*outQpIndex]);
-  return ncclSuccess;
-}
-
-static inline int
-mpibCommBaseGetNqpsPerRequest(struct mpibNetCommBase *baseComm) {
-  // Each request uses one QP per device (ndevs QPs total)
-  return baseComm->vProps.ndevs;
+static inline void mpibAddEvent(struct mpibRequest *req, int devIndex) {
+  req->events[devIndex]++;
+  req->devBases[devIndex] = mpibGetNetCommDevBase(req->base, devIndex);
 }
 
 ncclResult_t mpibInitCommDevBase(int ibDevN, struct mpibNetCommDevBase *base,

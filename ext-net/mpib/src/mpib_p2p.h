@@ -9,8 +9,7 @@
 //   - Advanced mode (MPIB_MODE=1): CTS always on SOUT (agent doesn't
 //     control CTS path).
 //
-// Data QPs use round-robin within each device (see
-// mpibCommBaseGetQpForRequest).
+// Data QPs use weighted round-robin via mpibWeightedSelectQp().
 static inline ncclResult_t
 mpibRecvCommGetQpForCts(struct mpibRecvComm *recvComm, uint32_t id,
                         mpibQp **qp) {
