@@ -25,17 +25,11 @@ NCCL_LIB_DIR=${NCCL_LIB_DIR:-/home/suweigao/mynccl/build/lib}
 # Build the runtime env we will export to ranks via mpirun.
 LD_LIBRARY_PATH_LAUNCH="${MPIB_DIR}:${NCCL_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 # Force-disable local-node transports for cross-node-only debugging:
-NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-1}
-NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
 NCCL_GIN_TYPE=${NCCL_GIN_TYPE:-0}
 
 # Debug
-NCCL_DEBUG=${NCCL_DEBUG:-INFO}
-NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET,GRAPH,SYS}
-
-# Baseline mode: force GDR off.
-NCCL_NET_GDR_LEVEL=6
-NCCL_NET_GDR_READ=${NCCL_NET_GDR_READ:-1}
+NCCL_DEBUG=${NCCL_DEBUG:-WARNING}
+NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
 
 MPIRUN_BASE=(
   mpirun
@@ -45,13 +39,11 @@ MPIRUN_BASE=(
   -x "HOST_MAP=${HOST_MAP}"
   -x "NCCL_DEBUG=${NCCL_DEBUG}"
   -x "NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
-  -x "NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL}"
-  -x "NCCL_NET_GDR_READ=${NCCL_NET_GDR_READ}"
-
-  -x "NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE}"
-  -x "NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE}"
   -x "NCCL_GIN_TYPE=${NCCL_GIN_TYPE}"
-  # -x "NCCL_NET_PLUGIN=mpib"
+
+  -x "NCCL_NET_PLUGIN=mpib"
+  -x "MPIB_MODE=1" # 0=vanilla, 1=advanced
+  # -x "NCCL_ALGO=TREE" # NCCL cannot adjust ALGO adaptively.
 )
 
 if [[ "${MPI_REPORT_BINDINGS}" == "1" ]]; then

@@ -15,8 +15,8 @@ MPIB_PARAM(IbSl, "IB_SL", -1);
 MPIB_PARAM(IbTc, "IB_TC", -1);
 MPIB_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 MPIB_PARAM(IbEceEnable, "IB_ECE_ENABLE", 1);
-MPIB_PARAM(SoutQp, "SOUT_QP", 2);
-MPIB_PARAM(SupQp, "SUP_QP", 4);
+MPIB_PARAM(SoutQp, "SOUT_QP", 1);
+MPIB_PARAM(SupQp, "SUP_QP", 2);
 MPIB_PARAM(IslandPrefixLen, "ISLAND_PREFIX_LEN", 24);
 MPIB_PARAM(Mode, "MODE", 0); // 0=vanilla, 1=advanced
 
