@@ -213,11 +213,12 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       // Post once on the receiver-chosen QP
       mpibAddEvent(req, selDevIdx);
       struct ibv_send_wr *bad_wr;
+      // Use reqs[0] as batch ID when nreqs > 1
       TRACE(NCCL_NET,
             "event=post_send comm=%lu req=%ld size=%zu nreqs=%u dev=%d qp=%d "
             "path=%d",
-            (unsigned long)(uintptr_t)&comm->base, req - comm->base.reqs, size,
-            nreqs, selDevIdx, selQpIdx, comm->base.pathClass);
+            (unsigned long)(uintptr_t)&comm->base, reqs[0] - comm->base.reqs,
+            size, nreqs, selDevIdx, selQpIdx, comm->base.pathClass);
       NCCLCHECK(wrap_ibv_post_send(selectedQp->qp, comm->wrs, &bad_wr));
     }
     // =========================================================================
@@ -402,6 +403,9 @@ mpibCompletionEventProcess(struct mpibNetCommBase *commBase, struct ibv_wc *wc,
   struct mpibRequest *req0 = commBase->reqs + reqIndex0;
 
   if (req0->type == MPIB_NET_IB_REQ_SEND && req0->nreqs > 1) {
+    TRACE(NCCL_NET, "event=cqe_send comm=%lu req=%ld size=%zu dev=%d",
+          (unsigned long)(uintptr_t)commBase, req0 - commBase->reqs,
+          req0->send.size, devIndex);
     for (uint32_t j = 0; j < req0->nreqs; j++) {
       const uint32_t reqIndex = (uint32_t)((wr_id >> (j * 8)) & 0xff);
       if (reqIndex >= NET_IB_MAX_REQUESTS)

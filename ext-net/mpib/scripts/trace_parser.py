@@ -7,7 +7,7 @@ Usage:
 
 Output columns (Stage 1 flat table):
     host, pid, tid, comm, req, case, size, nreqs, dev, path, qp,
-    post_send_ts, cqe_send_ts, latency_ms, xput_gbps
+    post_send_ts, cqe_send_ts, latency_us, xput_gbps
 """
 
 import argparse
@@ -47,7 +47,7 @@ CASE_LABEL = {
 OUTPUT_FIELDS = [
     "host", "pid", "tid", "comm", "req",
     "case", "size", "nreqs", "dev", "path", "qp",
-    "post_send_ts", "cqe_send_ts", "latency_ms", "xput_gbps",
+    "post_send_ts", "cqe_send_ts", "latency_us", "xput_gbps",
 ]
 
 
@@ -119,11 +119,11 @@ def parse(infile, outfile):
             ps = pending.pop(key)
             cqe_ts = ts
             post_ts = ps["post_send_ts"]
-            latency_ms = cqe_ts - post_ts
+            latency_us = (cqe_ts - post_ts) * 1000.0  # ms → µs
 
             try:
                 size_bytes = int(ps["size"])
-                xput_gbps = (size_bytes * 8) / (latency_ms * 1e6) if latency_ms > 0 else 0.0
+                xput_gbps = (size_bytes * 8) / (latency_us * 1e3) if latency_us > 0 else 0.0
             except (ValueError, ZeroDivisionError):
                 xput_gbps = 0.0
 
@@ -146,7 +146,7 @@ def parse(infile, outfile):
                 "qp":           ps["qp"],
                 "post_send_ts": f"{post_ts:.6f}",
                 "cqe_send_ts":  f"{cqe_ts:.6f}",
-                "latency_ms":   f"{latency_ms:.6f}",
+                "latency_us":   f"{latency_us:.3f}",
                 "xput_gbps":    f"{xput_gbps:.4f}",
             })
             matched += 1
