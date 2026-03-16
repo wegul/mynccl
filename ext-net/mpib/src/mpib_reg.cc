@@ -35,10 +35,6 @@ static ncclResult_t mpibRegMrDev(mpibNetCommDevBase *base, void *data,
         NCCLCHECK(wrap_ibv_reg_mr(&mr, base->pd, (void *)addr, pages * pageSize,
                                   flags));
       }
-      TRACE(NCCL_INIT | NCCL_NET,
-            "regAddr=0x%lx size=%lld rkey=0x%x lkey=0x%x fd=%d",
-            (unsigned long)addr, (long long)pages * pageSize, mr->rkey,
-            mr->lkey, fd);
       if (slot != cache->population)
         memmove(cache->slots + slot + 1, cache->slots + slot,
                 (cache->population - slot) * sizeof(struct mpibMr));

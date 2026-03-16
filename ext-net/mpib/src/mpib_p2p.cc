@@ -213,6 +213,11 @@ __hidden ncclResult_t mpibIsend(void *sendComm, void *data, size_t size,
       // Post once on the receiver-chosen QP
       mpibAddEvent(req, selDevIdx);
       struct ibv_send_wr *bad_wr;
+      TRACE(NCCL_NET,
+            "event=post_send comm=%lu req=%ld size=%zu nreqs=%u dev=%d qp=%d "
+            "path=%d",
+            (unsigned long)(uintptr_t)&comm->base, req - comm->base.reqs, size,
+            nreqs, selDevIdx, selQpIdx, comm->base.pathClass);
       NCCLCHECK(wrap_ibv_post_send(selectedQp->qp, comm->wrs, &bad_wr));
     }
     // =========================================================================
@@ -350,7 +355,6 @@ static inline bool mpibRequestIsComplete(struct mpibRequest *request) {
 
 static inline ncclResult_t mpibRequestComplete(struct mpibRequest *r, int *done,
                                                int *sizes) {
-  TRACE(NCCL_NET, "r=%p done type=%d", r, r->type);
   *done = 1;
   if (sizes && r->type == MPIB_NET_IB_REQ_RECV) {
     for (uint32_t i = 0; i < r->nreqs; i++)
@@ -386,7 +390,6 @@ mpibCompletionEventProcess(struct mpibNetCommBase *commBase, struct ibv_wc *wc,
       req->recv.sizes[0] = be32toh(wc->imm_data);
     }
     // nreqs > 1: sizes already in cmplsRecords, written by sender's lastWr
-
     req->events[devIndex]--;
     return ncclSuccess;
   }
@@ -414,6 +417,10 @@ mpibCompletionEventProcess(struct mpibNetCommBase *commBase, struct ibv_wc *wc,
   // Single SEND or CTS completion
   if (req0->events[devIndex] <= 0)
     return ncclInternalError;
+  if (req0->type == MPIB_NET_IB_REQ_SEND)
+    TRACE(NCCL_NET, "event=cqe_send comm=%lu req=%ld size=%zu dev=%d",
+          (unsigned long)(uintptr_t)commBase, req0 - commBase->reqs,
+          req0->send.size, devIndex);
   req0->events[devIndex]--;
   return ncclSuccess;
 }

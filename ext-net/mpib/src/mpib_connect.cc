@@ -202,11 +202,6 @@ ncclResult_t mpibCreateQp(uint8_t ib_port, struct mpibNetCommDevBase *base,
                                IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
                                    IBV_QP_ACCESS_FLAGS));
 
-  TRACE(NCCL_NET,
-        "NET/MPIB : mpibCreateQp port=%d dev=%d devName=%s qpn=%u pkey=%u "
-        "pd=%p",
-        ib_port, base->ibDevN, mpibDevs[base->ibDevN].devName, qp->qp->qp_num,
-        qpAttr.pkey_index, base->pd);
   return ncclSuccess;
 }
 
