@@ -8,32 +8,40 @@ The MPIB (Multi-Path IB) plugin enables heterogeneous multi-rail data transfer f
 
 * **Static Fusion:** Hides physical topology from NCCL; reports aggregate bandwidth.
 * **Path Isolation:** Topology-aware classification suppresses SUP QPs when the SUP fabric is unreachable (inter-island vanilla). See [path_isolation.md](path_isolation.md).
-* **Dynamic Splitting:** Per-transfer SOUT/SUP split via `mpibGetSupBw()`. Integer-only arithmetic (no floats on hot path).
+* **Receiver-Selected Rail/QP:** Each message is placed on exactly one rail / one QP, chosen by the receiver based on `mpibGetSupBw()` and advertised via CTS metadata.
 * **Multi-QP Support:** Configurable QP count per rail (`MPIB_SOUT_QP`, `MPIB_SUP_QP`).
-* **Agent-Ready:** SHM hint interface (`mpib_agent_iface.h`) for future agent-driven multipath (advanced mode).
 
 **Current Status (vs. Design):**
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Multi-NIC enumeration | ✅ Done | `MPIB_HCA_SOUT` / `MPIB_HCA_SUP` env vars |
-| Multi-rail QP setup | ✅ Done | Configurable per-rail QPs (`MPIB_SOUT_QP=2`, `MPIB_SUP_QP=4`) |
+| Multi-rail QP setup | ✅ Done | Configurable per-rail QPs (`MPIB_SOUT_QP`, `MPIB_SUP_QP`) |
 | Path isolation (vanilla) | ✅ Done | Island classification; SUP QP suppression for inter-island. See [path_isolation.md](path_isolation.md) |
-| Dynamic splitting | ✅ Done | `mpibGetSupBw()` + `mpibComputeSupBytes()`, integer-only |
-| SRQ + dynamic rail skipping | ✅ Done | Per-device SRQ; inactive rails skipped entirely; see [dual-rail-cqe.md](dual-rail-cqe.md) |
+| Receiver-selected one-QP data path | ✅ Done | Receiver picks one flat `qps[]` entry; sender mirrors that choice from CTS |
+| Weighted shuffle policy | ✅ Done | `mpibGetSupBw()` + `mpibWeightedSelectQp()`; see [weighted_qp_shuffle_design.md](weighted_qp_shuffle_design.md) |
 | GDR (nv_peermem) | ✅ Done | `NCCL_PTR_CUDA` advertised; GPU MR via `ibv_reg_mr` transparent |
 | Relaxed ordering | ✅ Done | `ibv_reg_mr_iova2` + `IBV_ACCESS_RELAXED_ORDERING`, default on |
 | Flush (`iflush`) | ✅ Done (no-op) | PCIe ordering makes flush unnecessary — see §9 |
-| Agent SHM interface | ✅ Done | `mpib_agent_iface.h` seqlock-based hints; agent daemon not yet implemented |
+| Agent client path | ✅ Done | Registration IPC + SHM reads are integrated in the plugin |
 
-### Notes: Multi-Rail Correctness
+### Notes: Current Multi-Rail Correctness
 
-MPIB posts a signaled `RDMA_WRITE_WITH_IMM` on each **active** rail only.
-Inactive rails are skipped entirely (no 0-byte IMMs). The receiver uses a
-per-device SRQ and learns the active rail set from `imm_data` (mask-learning
-protocol). SEND completion uses `events[devIndex]`; RECV completion uses
-`expected_mask == seen_mask`. See [dual-rail-cqe.md](dual-rail-cqe.md) for
-the full SRQ design.
+Current MPIB does **not** split one message across multiple rails. Instead:
+
+1. the receiver reads policy in `mpibIrecv()`,
+2. selects exactly one rail / one flat QP index,
+3. writes that selection into CTS metadata,
+4. and the sender posts exactly one WR chain on that selected QP.
+
+This makes rail choice explicit and removes the older SRQ / mask-learning path
+from the active implementation. Rail pairing is deterministic because QP index
+layout is contiguous on both sides: `[SOUT..., SUP...]`.
+
+> **Important:** [path_isolation.md](path_isolation.md) and [weighted_qp_shuffle_design.md](weighted_qp_shuffle_design.md)
+> describe the authoritative current behavior. Some deeper "Phase" sections in
+> this file are retained as historical design notes from an older SRQ-based
+> prototype.
 
 ---
 
@@ -45,12 +53,12 @@ Stateless executor.
 
 * **Init:** Enumerates 2 NICs (via `MPIB_HCA_SOUT` / `MPIB_HCA_SUP`), builds merged vDev.
 * **Connect:** Classifies path (intra/inter-island), creates QPs (suppresses SUP if unreachable).
-* **Data Path:** Reads policy via `mpibGetSupBw()` -> Splits data -> Posts to active QPs.
+* **Data Path:** Receiver reads policy via `mpibGetSupBw()`, chooses one rail/QP, and sender mirrors that choice from CTS.
 * **Progress:** Polls all CQs -> Aggregates completions.
 
-### B. The Agent (Policy) — *Future*
+### B. The Agent (Policy)
 
-Intelligent controller (outside plugin scope). Not yet implemented.
+External controller (outside plugin scope / repository).
 
 * **Role:** Monitor topology, congestion, and link health.
 * **Output:** Write per-flow SUP bandwidth hints to SHM.
@@ -58,7 +66,7 @@ Intelligent controller (outside plugin scope). Not yet implemented.
 
 In vanilla mode (`MPIB_MODE=0`), the agent is not needed — the plugin uses
 topology-driven path isolation. In advanced mode (`MPIB_MODE=1`), the plugin
-reads agent hints from SHM on every `isend()`. See [path_isolation.md](path_isolation.md) §4.
+reads agent hints from SHM on every `irecv()`. See [path_isolation.md](path_isolation.md) §4.
 
 ### C. Agent–Plugin Interface
 
@@ -88,7 +96,7 @@ Plugin                                  Agent
   │                                       │
   │   ... data transfers ...              │
   │   (plugin reads SHM[hint_slot]        │
-  │    on every isend)                    │
+  │    on every irecv)                    │
   │                                       │
   ├── DEREGISTER ─────────────────────>   │
   │   {conn_id}                           │
@@ -129,7 +137,7 @@ mpib_hint_write(&entries[slot], new_sup_bw);
 // Internally: seq++ (odd → write in progress), write sup_bw, seq++ (even → done)
 ```
 
-**Plugin reads** (read side, called on every `isend` in advanced mode):
+**Plugin reads** (read side, called on every `irecv` in advanced mode):
 ```c
 uint32_t bw = mpib_hint_read_raw(&entries[slot]);
 // Internally: spin while seq is odd; retry if seq changed during read

@@ -25,7 +25,7 @@ The design separates two concerns:
 | Concern | Granularity | When | Stored where |
 |---------|------------|------|--------------|
 | **Classification** — *can* SUP reach the peer? | Connection (once) | `connect()` / `accept()` | `base.pathClass`, `base.mode` |
-| **Policy** — *how much* traffic goes to SUP? | Transfer (every `isend()`) | `mpibGetSupBw()` | Return value, not stored |
+| **Policy** — *which rail/QP should carry the next message?* | Transfer (every `irecv()`) | `mpibGetSupBw()` + `mpibWeightedSelectQp()` | Return value + local selection, not persisted in metadata beyond CTS |
 
 Classification is a physical property of the topology and does not change for
 the lifetime of a connection. Policy is a runtime decision that can vary per
@@ -54,12 +54,10 @@ struct mpibNetCommBase {
 ### 2.2 Transfer-level decision
 
 ```c
-uint32_t mpibGetSupBw(struct mpibSendComm *comm, size_t size);
+uint32_t mpibGetSupBw(struct mpibRecvComm *comm, size_t size);
 ```
 
-Returns a *parts-per-1024* value (or sentinel) indicating how much of the
-transfer should use SUP. This is the **sole policy entry point**; `mpibIsend()`
-does not read `pathClass` or `mode` directly.
+Returns a *parts-per-1024* hint (or sentinel) that the receiver converts into a single rail / QP choice for the next message. This is the **sole policy entry point**; `mpibIrecv()` reads the policy, chooses the flat `qps[]` index, and publishes that choice to the sender via CTS metadata.
 
 ---
 
@@ -110,29 +108,23 @@ if (mode == 0) {
 }
 ```
 
-This drives the data split computation:
+The receiver converts that policy value into a single rail / QP selection:
 
 ```c
-static inline size_t mpibComputeSupBytes(uint32_t sup_bw, size_t reqSize) {
-  if (sup_bw == 0)     return 0;          // All SOUT
-  if (sup_bw >= 1024)  return reqSize;    // All SUP (includes UINT32_MAX)
-  return (size_t)(((uint64_t)reqSize * sup_bw) >> 10);
-}
+const uint32_t supbwHint = mpibGetSupBw(comm, 0);
+const int selectedQpIdx = mpibWeightedSelectQp(comm, supbwHint,
+                                               &selectedDevIndex);
 ```
 
-The resulting `active_mask` (bit 0 = SOUT, bit 1 = SUP) determines which
-rails post work requests. The QP iteration loop includes a guard for
-suppressed devices:
+Vanilla behavior therefore becomes:
 
-```c
-const int nqps = mpibCommBaseGetNqpsPerRequest(&comm->base);  // = ndevs = 2
-for (int i = 0; i < nqps; i++) {
-  mpibQp *qpPtr;
-  NCCLCHECK(mpibCommBaseGetQpForRequest(&comm->base, fifoHead, i, &qpPtr, &qpIdx));
-  if (qpPtr->qp == NULL) continue;   // SUP suppressed → skip
-  ...
-}
-```
+- **intra-island:** `selectedDevIndex = 1` and the selected flat QP is in the
+  SUP range `[nqpsSout, nqps)`;
+- **inter-island:** `selectedDevIndex = 0` and the selected flat QP is in the
+  SOUT range `[0, nqpsSout)`.
+
+The sender does not re-run policy. It reads `selectedDevIndex` /
+`selectedQpIndex` from CTS and posts on exactly that QP.
 
 ### 3.3 CTS routing
 
@@ -152,11 +144,11 @@ CTS RDMA writes follow strict path isolation:
 
 ---
 
-## 4. Advanced Mode (`MPIB_MODE=1`) — Future
+## 4. Advanced Mode (`MPIB_MODE=1`)
 
-Advanced mode enables an external agent process to control the SOUT/SUP split
-ratio per-transfer via shared memory hints. The classification layer is
-unchanged; only the policy function differs.
+Advanced mode is implemented in the plugin today. It enables an external agent process to control the SOUT/SUP split ratio per-transfer via shared memory hints. The classification layer is unchanged; only the policy function differs.
+
+Whether advanced mode is *operational* on a given deployment still depends on the external agent / relay environment being present.
 
 ### 4.1 What changes
 
@@ -240,18 +232,14 @@ Rail:   SOUT     SOUT          SOUT         SUP            SUP
 ```
 
 When `nqpsSup == 0` (inter-island vanilla), only indices `[0, nqpsSout)` hold
-valid QP objects. Indices `≥ nqpsSout` have `qp == NULL` (zero-initialized
-struct).
+valid QP objects.
 
-`mpibCommBaseGetQpForRequest(base, id, devIndex, &qp, &qpIdx)` selects a QP
-by device index using round-robin within that device's pool:
+`mpibWeightedSelectQp()` selects a flat QP index using round-robin within the chosen rail:
 
-- `devIndex == 0` → `qpIdx = id % nqpsSout`
-- `devIndex == 1` → `qpIdx = nqpsSout + (id % nqpsSup)`
+- SOUT → `qpIdx = qpCursorSout % nqpsSout`
+- SUP → `qpIdx = nqpsSout + (qpCursorSup % nqpsSup)`
 
-When `nqpsSup == 0`, the function returns a pointer to the zero-initialized
-struct at `qps[nqpsSout]`. Callers check `qpPtr->qp == NULL` to detect this
-and skip the rail.
+The same flat index is meaningful on both peers because both sides create QPs with the same contiguous rail layout and exchange each QP's `devIndex` during the metadata handshake.
 
 ---
 
@@ -273,9 +261,9 @@ and skip the rail.
 
 | File | Relevant functions | Role |
 |------|-------------------|------|
-| `mpib_common.h` | `mpibPathClass`, `mpibNetCommBase`, `mpibCommBaseGetQpForRequest` | Struct definitions, QP selection |
-| `mpib_connect.cc` | `mpibConnect`, `mpibAccept`, `mpibSocketAddrToIpv4`, `mpibIsSameIsland` | Classification, QP creation/suppression |
-| `mpib_p2p.cc` | `mpibIsend`, `mpibComputeSupBytes` | Data split, WR posting, `qp==NULL` guard |
+| `mpib_common.h` | `mpibPathClass`, `mpibNetCommBase`, `mpibQp` | Struct definitions and rail/QP metadata |
+| `mpib_connect.cc` | `mpibConnect`, `mpibAccept`, `mpibSenderQpsCreate`, `mpibSenderQpsToRts`, `mpibReceiverQpsCreateToRts` | Classification, QP creation, and rail pairing |
+| `mpib_p2p.cc` | `mpibWeightedSelectQp`, `mpibIrecv`, `mpibIsend` | Receiver-side rail choice and sender-side mirrored posting |
 | `mpib_p2p.h` | `mpibRecvCommGetQpForCts` | CTS rail selection |
 | `mpib_agent_client.cc` | `mpibGetSupBw` | Policy entry point (vanilla fast-path / advanced SHM read) |
 | `mpib_agent_iface.h` | `mpib_hint_entry`, `mpib_hint_read_raw` | SHM interface for agent hints |
