@@ -41,6 +41,7 @@ ncclResult_t mpibFreeRequest(struct mpibRequest *r) {
 //
 // Returns flat qps[] index. Sets *outDevIndex.
 // ===========================================================================
+static constexpr uint32_t kMPIBSupBwScale = 1024;
 static int mpibWeightedSelectQp(struct mpibRecvComm *comm, uint32_t supbwHint,
                                 int *outDevIndex) {
   struct mpibNetCommBase *base = &comm->base;
@@ -51,16 +52,16 @@ static int mpibWeightedSelectQp(struct mpibRecvComm *comm, uint32_t supbwHint,
     return (int)(base->qpCursorSout++ % base->nqpsSout);
   }
 
-  if (supbwHint >= 1024) {
+  if (supbwHint >= kMPIBSupBwScale) {
     // SUP-only
     *outDevIndex = 1;
     return (int)(base->nqpsSout + (base->qpCursorSup++ % base->nqpsSup));
   }
 
-  // Weighted split: the fraction (totalCursor % 1024) cycles 0..1023.
-  // supbwHint is parts-per-1024 of SUP share.
-  // Each message independently lands on the correct rail at the current ratio.
-  if ((base->totalCursor++ % 1024) < supbwHint) {
+  // Accumulator-based weighted round-robin
+  base->totalCursor += supbwHint;
+  if (base->totalCursor >= kMPIBSupBwScale) {
+    base->totalCursor -= kMPIBSupBwScale;
     *outDevIndex = 1;
     return (int)(base->nqpsSout + (base->qpCursorSup++ % base->nqpsSup));
   }
