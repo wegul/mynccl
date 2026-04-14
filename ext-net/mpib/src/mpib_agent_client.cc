@@ -8,7 +8,6 @@
 
 #include "mpib_agent_client.h"
 #include "mpib_common.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -269,7 +268,6 @@ uint32_t mpibGetSupBw(struct mpibRecvComm *comm, size_t size) {
                                           : 0;         // SOUT only
   }
 
-  // Advanced mode: read agent hint from SHM.
-  // (Future: gate on `size > BDP_threshold` for inter-island relay.)
+  // Advanced inter-island: read agent hint from SHM.
   return mpibReadHintRaw(comm->hint_slot);
 }

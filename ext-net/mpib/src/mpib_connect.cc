@@ -651,8 +651,8 @@ ib_send_ready:
          mpibSocketToString(&addr, line));
   }
 
-  /* Register connection with agent */
-  {
+  /* Register connection with agent for advanced inter-island flows only. */
+  if (comm->base.mode != 0 && comm->base.pathClass == MPIB_PATH_INTER_ISLAND) {
     uint16_t counter =
         g_mpib_conn_counter.fetch_add(1, std::memory_order_relaxed);
     comm->conn_id = MPIB_MAKE_CONN_ID(getpid(), counter);
@@ -1045,8 +1045,9 @@ ib_recv_ready:
     return ncclSuccess;
   }
 
-  /* Register connection with agent */
-  {
+  /* Register connection with agent for advanced inter-island flows only. */
+  if (rComm->base.mode != 0 &&
+      rComm->base.pathClass == MPIB_PATH_INTER_ISLAND) {
     uint16_t counter =
         g_mpib_conn_counter.fetch_add(1, std::memory_order_relaxed);
     rComm->conn_id = MPIB_MAKE_CONN_ID(getpid(), counter);
